@@ -1,22 +1,15 @@
-## v4.5.4
-- Cập nhật avatar cà rốt trên thanh điều hướng.
-- Đăng nhập bằng một ô: Gmail/email hoặc tên đăng nhập.
-- Hiển thị lỗi rate limit email rõ ràng và chống gửi đăng ký liên tiếp trong 30 giây.
-- Hoàn thiện avatar cà rốt mới trên thanh điều hướng và sửa tiêu đề trang.
-- Giữ chủ đề, số lần ôn và thời điểm học khi thêm lại một từ đã có.
-- Cải thiện sinh câu hỏi ôn tập, tránh đáp án trùng và xử lý từ có ký tự đặc biệt.
-
 # Học tiếng Anh cùng Rốt
 
-Phiên bản giao diện tối giản: giữ lại nhận diện cà rốt và tông màu cam, các chức năng/nội dung cũ đã được xóa.
+Phiên bản 4.5.5.
 
-## Chạy
+- Đăng nhập bằng Gmail/email hoặc tên đăng nhập trong một ô.
+- Avatar cà rốt trên thanh điều hướng.
+- Gợi ý từ khi nhập.
+- Thêm từ không bị phụ thuộc hoàn toàn vào dịch vụ tra cứu: nếu từ điển tạm thời lỗi, từ vẫn có thể được lưu với thông tin tối thiểu.
+- Lưu từ ưu tiên RPC `save_user_vocab`, có fallback RLS-protected upsert cho deployment cũ/chưa refresh schema cache.
+- Tự retry một lần cho lỗi mạng tạm thời.
+- Không đưa `.env.local` hoặc `node_modules` vào source control.
 
-```bash
-npm install
-npm run dev
-```
+## Biến môi trường
 
-
-### Kho từ không giới hạn
-Ứng dụng không đặt giới hạn số lần thêm từ hoặc số lượng từ trong kho. Khi tải dữ liệu từ Supabase, ứng dụng tự phân trang để vượt qua giới hạn 1.000 bản ghi của một lần truy vấn.
+`VITE_SUPABASE_URL` và `VITE_SUPABASE_ANON_KEY` (Publishable key) phải được cấu hình ở môi trường deploy.

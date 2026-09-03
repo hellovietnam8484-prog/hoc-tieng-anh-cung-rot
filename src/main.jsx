@@ -28,6 +28,40 @@ async function fetchWithTimeout(url, options = {}, timeout = FETCH_TIMEOUT_MS) {
   }
 }
 
+async function saveUserVocab(supabaseClient, payload) {
+  let lastError = null;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const { data: sessionData } = await supabaseClient.auth.getSession();
+      const sessionUser = sessionData?.session?.user;
+      if (!sessionUser) throw new Error("not_authenticated");
+      const safePayload = { ...payload, user_id: sessionUser.id };
+
+      const rpcResult = await supabaseClient.rpc("save_user_vocab", { vocab_payload: safePayload });
+      if (!rpcResult.error) return rpcResult.data;
+
+      const rpcMessage = cleanText(rpcResult.error.message || "");
+      if (/function .*save_user_vocab.*does not exist|could not find the function|schema cache/i.test(rpcMessage)) {
+        const fallback = await supabaseClient
+          .from("user_vocab")
+          .upsert(safePayload, { onConflict: "user_id,word_id" })
+          .select()
+          .single();
+        if (!fallback.error) return fallback.data;
+        throw fallback.error;
+      }
+      throw rpcResult.error;
+    } catch (error) {
+      lastError = error;
+      const message = cleanText(error?.message || error || "").toLowerCase();
+      const transient = /failed to fetch|networkerror|load failed|timeout|abort|signal is aborted|fetch/i.test(message);
+      if (!transient || attempt === 1) break;
+      await new Promise(resolve => setTimeout(resolve, 500));
+    }
+  }
+  throw lastError || new Error("save_failed");
+}
+
 function authErrorMessage(error) {
   const raw = cleanText(error?.message || error || "");
   const lower = raw.toLowerCase();
@@ -70,8 +104,16 @@ async function fetchWordSuggestions(text) {
 }
 
 async function fetchDictionary(word) {
-  const response = await fetchWithTimeout(`https://api.dictionaryapi.dev/api/v2/entries/en/${encodeURIComponent(word)}`);
-  if (!response.ok) throw new Error("not_found");
+  let response;
+  try {
+    response = await fetchWithTimeout(`https://api.dictionaryapi.dev/api/v2/entries/en/${encodeURIComponent(word)}`);
+  } catch (error) {
+    const wrapped = new Error("dictionary_unavailable");
+    wrapped.cause = error;
+    throw wrapped;
+  }
+  if (response.status === 404) throw new Error("not_found");
+  if (!response.ok) throw new Error("dictionary_unavailable");
   const data = await response.json(); const entry = data?.[0] || {}; const meanings = entry.meanings || [];
   const first = meanings[0] || {};
   const definition = cleanText(first.definitions?.[0]?.definition);
@@ -98,7 +140,22 @@ async function fetchCollocations(word) {
 async function enrichWord(word) {
   const key = `rot_dict_${normalizeWord(word)}`;
   try { const cached = localStorage.getItem(key); if (cached) return JSON.parse(cached); } catch {}
-  const base = await fetchDictionary(word);
+  let base;
+  try {
+    base = await fetchDictionary(word);
+  } catch (error) {
+    if (error?.message === "not_found") throw error;
+    // The dictionary is an enrichment service, not a prerequisite for saving.
+    // If it is temporarily unavailable, keep the word and let the user fill
+    // in details later instead of blocking the save operation.
+    return {
+      id: normalizeWord(word), word, meaning: "Chưa có dữ liệu nghĩa",
+      partOfSpeech: "Chưa xác định", ipa: "", audio: "",
+      collocations: [], examples: [], definitionEn: "", synonyms: [],
+      learnedAt: new Date().toISOString(), reps: 0,
+      _enrichmentUnavailable: true,
+    };
+  }
   const meaning = await translate(base.definition || base.word);
   const exampleRows = await Promise.all(base.examples.map(async (example) => ({ en: example, vi: await translate(example) })));
   const rawCollocations = await fetchCollocations(base.word);
@@ -254,14 +311,12 @@ function VocabPage({ vocab, setVocab, user, setPage }) {
         topic: existing?.topic || "Chưa phân loại",
       };
       if (!supabase) throw new Error("supabase_missing");
-      // Save through a small SECURITY DEFINER RPC. This avoids false failures from
-      // PostgREST upsert/RLS/trigger interactions while keeping the user_id server-side.
-      const { data: saved, error: saveError } = await supabase.rpc("save_user_vocab", { vocab_payload: payload });
-      if (saveError) throw saveError;
+      const saved = await saveUserVocab(supabase, payload);
       if (!saved) throw new Error("save_empty");
       const normalized = rowToVocab(saved);
       setVocab(current => current.some(item => item.id === normalized.id) ? current.map(item => item.id === normalized.id ? normalized : item) : [normalized, ...current]);
       setDetail(normalized); setWord(""); setSuggestions([]);
+      if (data._enrichmentUnavailable) setError("Đã lưu từ, nhưng dịch vụ tra cứu đang tạm thời không phản hồi. Bạn vẫn có thể dùng từ này và tra cứu lại sau.");
     } catch (e) {
       const raw = cleanText(e?.message || e || "");
       if (e?.message === "supabase_missing") setError("Chưa cấu hình Supabase. Hãy kiểm tra biến VITE_SUPABASE_URL và VITE_SUPABASE_ANON_KEY.");
@@ -269,8 +324,10 @@ function VocabPage({ vocab, setVocab, user, setPage }) {
       else if (/row-level security|permission denied|violates row-level security/i.test(raw)) setError("Supabase đang từ chối lưu từ. Hãy chạy lại supabase/schema.sql rồi thử lại.");
       else if (/duplicate key|unique constraint/i.test(raw)) setError("Từ này đã có trong kho. Nếu bạn muốn cập nhật thông tin, hãy thử lại sau vài giây.");
       else if (/save_empty/i.test(raw)) setError("Supabase không trả về dữ liệu sau khi lưu. Hãy thử lại.");
-      else if (/function .*save_user_vocab.*does not exist|could not find the function/i.test(raw)) setError("Database chưa có hàm lưu từ mới. Hãy chạy lại file supabase/schema.sql trên Supabase rồi thử lại.");
-      else if (/failed to fetch|networkerror|load failed|abort|signal is aborted|fetch/i.test(raw)) setError("Kết nối tới dịch vụ tra cứu hoặc Supabase bị gián đoạn. Hãy kiểm tra mạng rồi thử lại.");
+      else if (/function .*save_user_vocab.*does not exist|could not find the function/i.test(raw)) setError("Không thể lưu từ vì database chưa cập nhật hàm lưu. Hãy chạy lại supabase/schema.sql trên Supabase.");
+      else if (/not_authenticated/i.test(raw)) setError("Phiên đăng nhập đã hết hạn. Hãy đăng nhập lại rồi thử lưu từ.");
+      else if (/dictionary_unavailable/i.test(raw)) setError("Dịch vụ tra cứu từ đang tạm thời không phản hồi. Từ vẫn có thể được lưu lại; hãy thử lại phần tra cứu sau.");
+      else if (/failed to fetch|networkerror|load failed|abort|signal is aborted|fetch/i.test(raw)) setError("Kết nối mạng hoặc Supabase đang gián đoạn. Hãy kiểm tra kết nối rồi thử lại.");
       else setError(raw ? `Không thể lưu từ: ${raw}` : "Không thể lưu từ. Hãy kiểm tra kết nối mạng, Supabase và tài khoản rồi thử lại.");
     }
     finally { setLoading(false); }
