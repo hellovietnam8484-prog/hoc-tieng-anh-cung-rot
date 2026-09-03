@@ -255,6 +255,9 @@ begin
 end;
 $$;
 
+revoke execute on function public.link_account(text) from public;
+grant execute on function public.link_account(text) to authenticated;
+
 -- Any newly added/updated word is mirrored to every member of the same group.
 create or replace function public.sync_group_vocab()
 returns trigger

@@ -229,8 +229,15 @@ async function fetchCollocations(word) {
       `https://api.datamuse.com/words?rel_jja=${encodeURIComponent(word)}&max=5`,
       `https://api.datamuse.com/words?rel_trg=${encodeURIComponent(word)}&max=5`,
     ];
-    const results = await Promise.all(requests.map((url) => fetchWithTimeout(url).then((r) => (r.ok ? r.json() : []))));
-    const words = results.flat().map((item) => cleanText(item.word)).filter(Boolean);
+    const results = await Promise.all(requests.map(async (url) => {
+      try {
+        const response = await fetchWithTimeout(url);
+        return response.ok ? await response.json() : [];
+      } catch {
+        return [];
+      }
+    }));
+    const words = results.flat().map((item) => cleanText(item?.word)).filter(Boolean);
     return [...new Set(words)].filter((item) => item.toLowerCase() !== word.toLowerCase()).slice(0, 8).map((item) => `${item} ${word}`);
   } catch { return []; }
 }
@@ -265,7 +272,7 @@ async function enrichWord(word, forceRefresh = false) {
   const rawCollocations = await fetchCollocations(base.word);
   const collocations = normalizeDetailRows(await Promise.all(rawCollocations.map(async (phrase) => ({ en: phrase, vi: await translate(phrase) }))));
   const result = { id: normalizeWord(base.word), word: base.word, meaning: shortMeaning(meaning), partOfSpeech: base.partOfSpeech || "Chưa xác định", ipa: base.phonetic || "", audio: base.audio || "", collocations, examples: exampleRows, definitionEn: cleanText(base.definition), synonyms: Array.isArray(base.synonyms) ? [...new Set(base.synonyms.map(cleanText).filter(Boolean))].slice(0, 8) : [], learnedAt: new Date().toISOString(), reps: 0 };
-  localStorage.setItem(key, JSON.stringify(result));
+  try { localStorage.setItem(key, JSON.stringify(result)); } catch {}
   return result;
 }
 
@@ -483,14 +490,13 @@ function VocabPage({ vocab, setVocab, user, setPage, vocabError }) {
     {vocabError && <div className="error-box">{vocabError}</div>}
     {error && <div className="error-box">{error}</div>}
     {notice && <div className="notice-box">{notice}</div>}
-    {detail && <WordDetail item={detail} onClose={() => setDetail(null)} onDelete={() => removeWord(detail)} onRefresh={refreshWord} />}
     <div className="topic-manager">
       <div><h3>Chủ đề của bạn</h3><p className="muted">Tự đặt tên chủ đề để phân loại từ theo cách bạn muốn.</p></div>
       <form onSubmit={createTopic} className="topic-create"><input value={newTopic} onChange={e => setNewTopic(e.target.value)} placeholder="Ví dụ: Từ vựng IELTS Writing" /><button className="secondary" disabled={!user}>＋ Tạo chủ đề</button></form>
       <div className="topic-chips">{topics.map(topic => <span className="topic-chip" key={topic}>{topic}</span>)}</div>
     </div>
     <div className="list-toolbar"><div><h3>Từ đã lưu</h3><span className="muted">Chọn chủ đề ngay trên từng từ.</span></div><input value={query} onChange={e => setQuery(e.target.value)} placeholder="Tìm từ hoặc nghĩa..." /></div>
-    <div className="vocab-list">{filtered.length === 0 && <div className="empty">{user ? "Chưa có từ nào. Hãy thêm từ đầu tiên ở phía trên." : "Đăng nhập để xem kho từ cá nhân."}</div>}{filtered.map(item => <div className="vocab-row" key={item.id} role="button" tabIndex={0} aria-label={`Xem chi tiết từ ${item.word}`} onClick={() => setDetail(item)} onKeyDown={e => { if (e.target.closest("select,button,input")) return; if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setDetail(item); } }}><div className="word-main"><b>{item.word}</b><span>{item.partOfSpeech}</span></div><div className="word-meaning">{item.meaning || "Chưa có nghĩa"}</div><div className="word-ipa">{item.ipa || "—"}</div><select className="topic-select" value={item.topic || "Chưa phân loại"} onClick={e => e.stopPropagation()} onChange={e => updateTopic(item, e.target.value)}>{topics.map(topic => <option key={topic} value={topic}>{topic}</option>)}</select><span className="arrow">›</span></div>)}</div>
+    <div className="vocab-list">{filtered.length === 0 && <div className="empty">{user ? "Chưa có từ nào. Hãy thêm từ đầu tiên ở phía trên." : "Đăng nhập để xem kho từ cá nhân."}</div>}{filtered.map(item => <React.Fragment key={item.id}><div className={`vocab-row ${detail?.id === item.id ? "selected" : ""}`} role="button" tabIndex={0} aria-expanded={detail?.id === item.id} aria-label={`Xem chi tiết từ ${item.word}`} onClick={() => setDetail(current => current?.id === item.id ? null : item)} onKeyDown={e => { if (e.target.closest("select,button,input")) return; if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setDetail(current => current?.id === item.id ? null : item); } }}><div className="word-main"><b>{item.word}</b><span>{item.partOfSpeech}</span></div><div className="word-meaning">{item.meaning || "Chưa có nghĩa"}</div><div className="word-ipa">{item.ipa || "—"}</div><select className="topic-select" value={item.topic || "Chưa phân loại"} onClick={e => e.stopPropagation()} onChange={e => updateTopic(item, e.target.value)}>{topics.map(topic => <option key={topic} value={topic}>{topic}</option>)}</select><span className="arrow">{detail?.id === item.id ? "⌄" : "›"}</span></div>{detail?.id === item.id && <WordDetail item={detail} onClose={() => setDetail(null)} onDelete={() => removeWord(detail)} onRefresh={refreshWord} />}</React.Fragment>)}</div>
   </section>;
 }
 
