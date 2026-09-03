@@ -1,4 +1,4 @@
-# Học tiếng anh cùng rốt
+# Học tiếng Anh cùng Rốt
 
 Phiên bản giao diện tối giản: giữ lại nhận diện cà rốt và tông màu cam, các chức năng/nội dung cũ đã được xóa.
 

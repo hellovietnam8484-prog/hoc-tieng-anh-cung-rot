@@ -102,13 +102,13 @@ function buildQuestions(vocab, count) {
 
 function Header({ page, setPage, user, onAccount }) {
   return <header className="topbar">
-    <div className="brand-mini" onClick={() => setPage("home")}><img src={carrotLogo} alt="Cà rốt" /><span>Học tiếng anh cùng rốt</span></div>
+    <div className="brand-mini" onClick={() => setPage("home")}><img src={carrotLogo} alt="Cà rốt" /><span>Học tiếng Anh cùng Rốt</span></div>
     <nav>
       <button className={page === "home" ? "active" : ""} onClick={() => setPage("home")}>Trang chủ</button>
       <button className={page === "vocab" ? "active" : ""} onClick={() => setPage("vocab")}>Từ vựng</button>
       <button className={page === "review" ? "active" : ""} onClick={() => setPage("review")}>Ôn tập</button>
-      <button className={page === "account" ? "active" : ""} onClick={onAccount}>Tài khoản</button>
       <button className={page === "link" ? "active" : ""} onClick={() => setPage("link")}>Liên kết</button>
+      <button className={page === "account" ? "active" : ""} onClick={onAccount}>Tài khoản</button>
     </nav>
   </header>;
 }
@@ -117,8 +117,8 @@ function Home({ setPage, user }) {
   return <section className="home-card">
     <img className="hero-carrot" src={carrotLogo} alt="Cà rốt" />
     <div className="eyebrow">HỌC TIẾNG ANH MỖI NGÀY</div>
-    <h1>Học tiếng anh<br />cùng rốt</h1>
-    <p>{user ? `Xin chào ${user.email}. Từ bạn thêm sẽ được lưu vào tài khoản.` : "Đăng nhập để lưu từ vựng và ôn tập trên mọi lần mở ứng dụng."}</p>
+    <h1>Học tiếng Anh<br />cùng Rốt</h1>
+    <p>{user ? `Xin chào ${user.user_metadata?.username || user.email}.` : "Đăng nhập để lưu từ vựng và ôn tập trên mọi lần mở ứng dụng."}</p>
     <div className="home-actions">
       <button className="primary" onClick={() => setPage("vocab")}>＋ Thêm từ vựng</button>
       <button className="secondary" onClick={() => setPage("review")}>▶ Ôn tập ngay</button>
@@ -183,7 +183,7 @@ function VocabPage({ vocab, setVocab, user, setPage }) {
   };
   const filtered = useMemo(() => { const q = cleanText(query).toLowerCase(); return q ? vocab.filter(item => item.word.toLowerCase().includes(q) || item.meaning.toLowerCase().includes(q)) : vocab; }, [vocab, query]);
   return <section className="page-card">
-    <div className="page-heading"><div><div className="eyebrow">KHO CÁ NHÂN</div><h2>Từ vựng</h2><p>Nhập từ tiếng Anh để lấy nghĩa tiếng Việt, từ loại, phiên âm, cụm từ và ví dụ. <b>Không giới hạn số lần thêm từ và số từ trong kho.</b> Từ chỉ được lưu khi bạn đăng nhập.</p></div><div className="count-badge">{vocab.length} từ đã lưu · Không giới hạn</div></div>
+    <div className="page-heading"><div><div className="eyebrow">KHO CÁ NHÂN</div><h2>Từ vựng</h2><p>Nhập từ tiếng Anh để lấy nghĩa tiếng Việt, từ loại, phiên âm, cụm từ và ví dụ.</p></div><div className="count-badge">{vocab.length} từ đã lưu</div></div>
     {!user && <div className="login-notice">🔐 Muốn lưu từ và dùng ôn tập, hãy <button onClick={() => setPage("account")}>đăng nhập / tạo tài khoản</button>.</div>}
     <form className="add-form" onSubmit={addWord}><input value={word} onChange={e => setWord(e.target.value)} placeholder="Ví dụ: environment" aria-label="Từ tiếng Anh" /><button className="primary" disabled={loading || !user}>{loading ? "Đang lưu..." : "＋ Thêm từ"}</button></form>
     {error && <div className="error-box">{error}</div>}
@@ -222,8 +222,8 @@ function ReviewPage({ vocab, user, setPage }) {
 }
 
 function LinkPage({ user }) {
-  const [code, setCode] = useState(""); const [myCode, setMyCode] = useState(""); const [members, setMembers] = useState([]); const [message, setMessage] = useState(""); const [error, setError] = useState(""); const [loading, setLoading] = useState(false);
-  const load = async () => { if (!user || !supabase) return; const { data: profile } = await supabase.from("profiles").select("link_code").eq("user_id", user.id).maybeSingle(); if (profile) setMyCode(profile.link_code); const { data: rows } = await supabase.from("vocab_group_members").select("user_id, profiles!inner(link_code)").eq("user_id", user.id); if (rows) setMembers(rows); };
+  const [code, setCode] = useState(""); const [myCode, setMyCode] = useState(""); const [message, setMessage] = useState(""); const [error, setError] = useState(""); const [loading, setLoading] = useState(false);
+  const load = async () => { if (!user || !supabase) return; const { data: profile, error: profileError } = await supabase.from("profiles").select("link_code").eq("user_id", user.id).maybeSingle(); if (profileError) setError("Không thể tải mã liên kết. Hãy kiểm tra Supabase."); else if (profile) setMyCode(profile.link_code); };
   useEffect(() => { load(); }, [user]);
   const link = async e => { e.preventDefault(); setLoading(true); setError(""); setMessage(""); if (!supabase) { setError("Chưa cấu hình Supabase."); setLoading(false); return; } const { data, error: rpcError } = await supabase.rpc("link_account", { target_code: code.trim().toUpperCase() }); if (rpcError) setError(rpcError.message || "Không thể liên kết tài khoản."); else { setMessage(data?.message || "Đã liên kết tài khoản. Kho từ và chủ đề sẽ đồng bộ."); setCode(""); await load(); } setLoading(false); };
   if (!user) return <section className="page-card link-card"><div className="review-carrot"><img src={carrotLogo} alt="Cà rốt" /></div><div className="eyebrow">LIÊN KẾT</div><h2>Liên kết kho từ</h2><p>Bạn cần đăng nhập để tạo mã liên kết và kết nối kho từ với tài khoản khác.</p></section>;
@@ -231,11 +231,50 @@ function LinkPage({ user }) {
 }
 
 function AccountPage({ user, authReady, onSignedIn, onSignOut }) {
-  const [mode, setMode] = useState("login"); const [email, setEmail] = useState(""); const [password, setPassword] = useState(""); const [loading, setLoading] = useState(false); const [message, setMessage] = useState(""); const [error, setError] = useState("");
-  const submit = async e => { e.preventDefault(); setLoading(true); setError(""); setMessage(""); if (!supabase) { setError("Chưa cấu hình Supabase. Hãy tạo file .env.local từ .env.example và điền URL + anon key."); setLoading(false); return; } try { if (mode === "login") { const { data, error: signError } = await supabase.auth.signInWithPassword({ email: email.trim(), password }); if (signError) throw signError; onSignedIn(data.user); setMessage("Đăng nhập thành công."); } else { const { data, error: signError } = await supabase.auth.signUp({ email: email.trim(), password }); if (signError) throw signError; onSignedIn(data.user); setMessage(data.session ? "Tạo tài khoản thành công." : "Tài khoản đã tạo. Nếu Supabase bật xác minh email, hãy mở email để xác nhận trước khi đăng nhập."); } } catch (err) { setError(err?.message || "Không thể thực hiện. Hãy kiểm tra email và mật khẩu."); } finally { setLoading(false); } };
+  const [mode, setMode] = useState("login");
+  const [username, setUsername] = useState("");
+  const [email, setEmail] = useState("");
+  const [loginValue, setLoginValue] = useState("");
+  const [password, setPassword] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
+
+  const submit = async e => {
+    e.preventDefault(); setLoading(true); setError(""); setMessage("");
+    if (!supabase) { setError("Chưa cấu hình Supabase. Hãy kiểm tra biến môi trường."); setLoading(false); return; }
+    try {
+      if (mode === "login") {
+        const value = cleanText(loginValue);
+        let loginEmail = value;
+        if (!value.includes("@")) {
+          const { data: emailData, error: lookupError } = await supabase.rpc("get_login_email", { login_value: value.toLowerCase() });
+          if (lookupError) throw lookupError;
+          if (!emailData) throw new Error("Không tìm thấy tên đăng nhập này.");
+          loginEmail = emailData;
+        }
+        const { data, error: signError } = await supabase.auth.signInWithPassword({ email: loginEmail.trim().toLowerCase(), password });
+        if (signError) throw signError;
+        onSignedIn(data.user); setMessage("Đăng nhập thành công.");
+      } else {
+        const cleanUsername = cleanText(username).toLowerCase();
+        const cleanEmail = cleanText(email).toLowerCase();
+        if (!/^[a-z0-9._-]{3,30}$/.test(cleanUsername)) throw new Error("Tên đăng nhập dài 3–30 ký tự, chỉ gồm chữ không dấu, số, dấu chấm, gạch dưới hoặc gạch ngang.");
+        if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) throw new Error("Gmail/email không hợp lệ.");
+        const { data: exists, error: existsError } = await supabase.rpc("username_available", { wanted_username: cleanUsername });
+        if (existsError) throw existsError;
+        if (!exists) throw new Error("Tên đăng nhập này đã được sử dụng.");
+        const { data, error: signError } = await supabase.auth.signUp({ email: cleanEmail, password, options: { data: { username: cleanUsername } } });
+        if (signError) throw signError;
+        if (data.session) { onSignedIn(data.user); setMessage("Tạo tài khoản thành công."); }
+        else { setMessage("Tạo tài khoản thành công. Hãy kiểm tra Gmail/email để xác nhận tài khoản nếu Supabase yêu cầu."); }
+      }
+    } catch (err) { setError(err?.message || "Không thể thực hiện. Hãy kiểm tra thông tin và thử lại."); }
+    finally { setLoading(false); }
+  };
   if (!authReady) return <section className="page-card account-card"><h2>Tài khoản</h2><p>Đang kiểm tra phiên đăng nhập...</p></section>;
-  if (user) return <section className="page-card account-card"><img src={carrotLogo} alt="Cà rốt" /><div className="eyebrow">TÀI KHOẢN</div><h2>Xin chào!</h2><p>Tài khoản đang đăng nhập: <b>{user.email}</b></p><div className="account-note">🔒 Từ vựng của bạn được lưu riêng theo tài khoản trên Supabase.</div><button className="primary" onClick={onSignOut}>Đăng xuất</button></section>;
-  return <section className="page-card account-card"><img src={carrotLogo} alt="Cà rốt" /><div className="eyebrow">TÀI KHOẢN</div><h2>{mode === "login" ? "Đăng nhập" : "Tạo tài khoản"}</h2><p>{mode === "login" ? "Đăng nhập để lưu từ vựng và ôn tập." : "Tạo tài khoản để kho từ được lưu lại."}</p><form className="account-form" onSubmit={submit}><input type="email" value={email} onChange={e => setEmail(e.target.value)} placeholder="Email" required /><input type="password" value={password} onChange={e => setPassword(e.target.value)} placeholder="Mật khẩu (tối thiểu 6 ký tự)" minLength={6} required /><button className="primary" disabled={loading}>{loading ? "Đang xử lý..." : mode === "login" ? "Đăng nhập" : "Tạo tài khoản"}</button></form>{error && <div className="error-box">{error}</div>}{message && <div className="success-box">{message}</div>}<button className="link-btn" onClick={() => { setMode(mode === "login" ? "signup" : "login"); setError(""); setMessage(""); }}>{mode === "login" ? "Chưa có tài khoản? Tạo tài khoản" : "Đã có tài khoản? Đăng nhập"}</button></section>;
+  if (user) return <section className="page-card account-card"><img src={carrotLogo} alt="Cà rốt" /><div className="eyebrow">TÀI KHOẢN</div><h2>Xin chào!</h2><p>Tài khoản đang đăng nhập: <b>{user.email}</b></p><button className="primary" onClick={onSignOut}>Đăng xuất</button></section>;
+  return <section className="page-card account-card"><img src={carrotLogo} alt="Cà rốt" /><div className="eyebrow">TÀI KHOẢN</div><h2>{mode === "login" ? "Đăng nhập" : "Tạo tài khoản"}</h2><p>{mode === "login" ? "Đăng nhập bằng Gmail/email hoặc tên đăng nhập." : "Tạo tài khoản bằng tên đăng nhập, Gmail/email và mật khẩu."}</p><form className="account-form" onSubmit={submit}>{mode === "signup" && <input value={username} onChange={e => setUsername(e.target.value)} placeholder="Tên đăng nhập" minLength={3} maxLength={30} autoComplete="username" required />}{mode === "signup" ? <input type="email" value={email} onChange={e => setEmail(e.target.value)} placeholder="Gmail / Email" autoComplete="email" required /> : <input type="text" value={loginValue} onChange={e => setLoginValue(e.target.value)} placeholder="Gmail / Email hoặc tên đăng nhập" autoComplete="username" required />}{<input type="password" value={password} onChange={e => setPassword(e.target.value)} placeholder="Mật khẩu (tối thiểu 6 ký tự)" minLength={6} autoComplete={mode === "login" ? "current-password" : "new-password"} required />}<button className="primary" disabled={loading}>{loading ? "Đang xử lý..." : mode === "login" ? "Đăng nhập" : "Tạo tài khoản"}</button></form>{error && <div className="error-box">{error}</div>}{message && <div className="success-box">{message}</div>}<button className="link-btn" onClick={() => { setMode(mode === "login" ? "signup" : "login"); setError(""); setMessage(""); }}>{mode === "login" ? "Chưa có tài khoản? Tạo tài khoản" : "Đã có tài khoản? Đăng nhập"}</button></section>;
 }
 
 function rowToVocab(row) { return { id: row.word_id, word: row.word, meaning: row.meaning || "", partOfSpeech: row.part_of_speech || "Chưa xác định", ipa: row.ipa || "", audio: row.audio || "", collocations: row.collocations || [], examples: row.examples || [], definitionEn: row.definition_en || "", synonyms: row.synonyms || [], learnedAt: row.learned_at, reps: row.reps || 0, topic: row.topic || "Chưa phân loại" }; }
@@ -271,7 +310,7 @@ function App() {
   useEffect(() => { if (user || !vocab.length) return; localStorage.removeItem(STORAGE_KEY); }, [user, vocab.length]);
   const signOut = async () => { if (supabase) await supabase.auth.signOut(); setUser(null); setVocab([]); setPage("home"); };
   const goAccount = () => setPage("account");
-  return <div className="carrot-app"><Header page={page} setPage={setPage} user={user} onAccount={goAccount} /><main className="content">{page === "home" && <Home setPage={setPage} user={user} />}{page === "vocab" && <VocabPage vocab={vocab} setVocab={setVocab} user={user} setPage={setPage} />}{page === "review" && <ReviewPage vocab={vocab} user={user} setPage={setPage} />}{page === "account" && <AccountPage user={user} authReady={authReady} onSignedIn={setUser} onSignOut={signOut} />} {page === "link" && <LinkPage user={user} />}</main><footer>🥕 Học tiếng anh cùng rốt · Từ đã lưu được bảo vệ theo tài khoản</footer></div>;
+  return <div className="carrot-app"><Header page={page} setPage={setPage} user={user} onAccount={goAccount} /><main className="content">{page === "home" && <Home setPage={setPage} user={user} />}{page === "vocab" && <VocabPage vocab={vocab} setVocab={setVocab} user={user} setPage={setPage} />}{page === "review" && <ReviewPage vocab={vocab} user={user} setPage={setPage} />}{page === "account" && <AccountPage user={user} authReady={authReady} onSignedIn={setUser} onSignOut={signOut} />} {page === "link" && <LinkPage user={user} />}</main><footer>🥕 Học tiếng Anh cùng Rốt</footer></div>;
 }
 
 createRoot(document.getElementById("root")).render(<App />);

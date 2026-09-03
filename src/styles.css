@@ -45,7 +45,7 @@ p { color: #958a84; line-height: 1.65; }
 .page-heading p { max-width: 720px; margin-bottom: 0; }
 .count-badge, .review-stats { background: #fff4ed; color: #ff6415; border: 1px solid #ffd5bd; border-radius: 16px; padding: 11px 15px; font-weight: 800; white-space: nowrap; }
 .add-form { display: flex; gap: 10px; margin-bottom: 14px; }
-.add-form input, .list-toolbar input { width: 100%; border: 1px solid #f1d8ca; border-radius: 14px; padding: 13px 15px; outline: none; color: #4f4c52; background: #fffaf7; }
+.add-form input, .list-toolbar input { width: 100%; border: 1px solid #f1d8ca; border-radius: 14px; padding: 13px 15px; outline: none; color: #4f4c52; background: #fff; }
 .add-form input:focus, .list-toolbar input:focus { border-color: #ff9a6b; box-shadow: 0 0 0 4px rgba(255,100,21,.08); }
 .error-box { background: #fff1ed; border: 1px solid #ffc7b4; color: #b84d2a; border-radius: 14px; padding: 12px 14px; margin: 12px 0; }
 .detail-panel { margin: 18px 0 24px; padding: 22px; border-radius: 20px; background: #fff8f3; border: 1px solid #ffd7c0; }
@@ -70,7 +70,7 @@ p { color: #958a84; line-height: 1.65; }
 .list-toolbar input { max-width: 320px; }
 .vocab-list { display: grid; gap: 8px; }
 .vocab-row { width: 100%; display: grid; grid-template-columns: minmax(180px, 1.1fr) minmax(180px, 1fr) 130px 22px; align-items: center; gap: 12px; text-align: left; border: 1px solid #f3e4dc; background: #fff; border-radius: 15px; padding: 14px 16px; color: #5d5960; }
-.vocab-row:hover { border-color: #ffc5a6; background: #fffaf7; }
+.vocab-row:hover { border-color: #ffc5a6; background: #fff; }
 .word-main b { display: block; color: #3e3b41; font-size: 17px; }
 .word-main span { font-size: 12px; color: #ff6415; font-weight: 800; }
 .word-meaning { font-weight: 700; }
@@ -97,7 +97,7 @@ p { color: #958a84; line-height: 1.65; }
 .question-prompt { min-height: 90px; display: flex; align-items: center; justify-content: center; text-align: center; color: #3e3b41; font-size: clamp(23px, 4vw, 34px); font-weight: 850; line-height: 1.3; margin-bottom: 22px; }
 .choices { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .choice { display: flex; align-items: flex-start; gap: 10px; text-align: left; border: 1px solid #eadbd3; background: #fff; color: #504c52; border-radius: 15px; padding: 16px; min-height: 68px; }
-.choice:hover { border-color: #ffad82; background: #fffaf7; }
+.choice:hover { border-color: #ffad82; background: #fff; }
 .choice > b { color: #ff6415; }
 .choice.correct { border-color: #74b989; background: #eefaf1; }
 .choice.wrong { border-color: #e78d78; background: #fff0ed; }

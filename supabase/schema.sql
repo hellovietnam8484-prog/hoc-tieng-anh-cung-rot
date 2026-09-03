@@ -29,8 +29,12 @@ create table if not exists public.vocab_groups (
 create table if not exists public.profiles (
   user_id uuid primary key references auth.users(id) on delete cascade,
   link_code text not null unique,
+  username text,
   created_at timestamptz not null default now()
 );
+
+alter table public.profiles add column if not exists username text;
+create unique index if not exists profiles_username_lower_idx on public.profiles (lower(username)) where username is not null;
 
 create table if not exists public.vocab_group_members (
   group_id uuid not null references public.vocab_groups(id) on delete cascade,
@@ -67,11 +71,22 @@ language plpgsql
 security definer
 set search_path = public
 as $$
-declare g uuid;
+declare
+  g uuid;
+  requested_username text;
+  final_username text;
 begin
+  requested_username := lower(trim(coalesce(new.raw_user_meta_data->>'username', '')));
+  if requested_username !~ '^[a-z0-9._-]{3,30}$' then
+    requested_username := lower(split_part(coalesce(new.email, 'user'), '@', 1));
+  end if;
+  final_username := requested_username;
+  if exists (select 1 from public.profiles where lower(username) = lower(final_username)) then
+    raise exception 'Tên đăng nhập đã được sử dụng.';
+  end if;
   insert into public.vocab_groups default values returning id into g;
   insert into public.vocab_group_members(group_id, user_id) values(g, new.id) on conflict (user_id) do nothing;
-  insert into public.profiles(user_id, link_code) values(new.id, upper(substr(replace(gen_random_uuid()::text, '-', ''), 1, 8))) on conflict (user_id) do nothing;
+  insert into public.profiles(user_id, link_code, username) values(new.id, upper(substr(replace(gen_random_uuid()::text, '-', ''), 1, 8)), final_username) on conflict (user_id) do update set username = excluded.username;
   return new;
 end;
 $$;
@@ -83,19 +98,55 @@ for each row execute function public.handle_new_user();
 
 -- Backfill profiles/groups for accounts created before this migration.
 do $$
-declare r record; g uuid;
+declare r record; g uuid; candidate text; final_username text;
 begin
-  for r in select id from auth.users loop
+  for r in select id, email, raw_user_meta_data from auth.users loop
+    candidate := lower(trim(coalesce(r.raw_user_meta_data->>'username', split_part(coalesce(r.email, 'user'), '@', 1))));
+    if candidate !~ '^[a-z0-9._-]{3,30}$' then candidate := 'user_' || substr(replace(r.id::text, '-', ''), 1, 8); end if;
+    final_username := candidate;
+    if exists (select 1 from public.profiles where user_id <> r.id and lower(username) = lower(final_username)) then
+      final_username := left(candidate, 24) || '_' || substr(replace(r.id::text, '-', ''), 1, 5);
+    end if;
     if not exists (select 1 from public.profiles where user_id = r.id) then
       insert into public.vocab_groups default values returning id into g;
       insert into public.vocab_group_members(group_id, user_id) values(g, r.id) on conflict (user_id) do nothing;
-      insert into public.profiles(user_id, link_code) values(r.id, upper(substr(replace(gen_random_uuid()::text, '-', ''), 1, 8))) on conflict (user_id) do nothing;
-    elsif not exists (select 1 from public.vocab_group_members where user_id = r.id) then
+      insert into public.profiles(user_id, link_code, username) values(r.id, upper(substr(replace(gen_random_uuid()::text, '-', ''), 1, 8)), final_username);
+    else
+      update public.profiles set username = coalesce(username, final_username) where user_id = r.id;
+    end if;
+    if not exists (select 1 from public.vocab_group_members where user_id = r.id) then
       insert into public.vocab_groups default values returning id into g;
       insert into public.vocab_group_members(group_id, user_id) values(g, r.id) on conflict (user_id) do nothing;
     end if;
   end loop;
 end $$;
+
+-- Public-safe lookup helpers used only to resolve a username at login time.
+create or replace function public.username_available(wanted_username text)
+returns boolean
+language sql
+security definer
+set search_path = public
+as $$
+  select not exists (select 1 from public.profiles where lower(username) = lower(trim(wanted_username)));
+$$;
+
+grant execute on function public.username_available(text) to anon, authenticated;
+
+create or replace function public.get_login_email(login_value text)
+returns text
+language sql
+security definer
+set search_path = public
+as $$
+  select u.email::text
+  from public.profiles p
+  join auth.users u on u.id = p.user_id
+  where lower(p.username) = lower(trim(login_value))
+  limit 1;
+$$;
+
+grant execute on function public.get_login_email(text) to anon, authenticated;
 
 -- Linking merges the two sharing groups. Existing vocabulary is copied both ways.
 create or replace function public.link_account(target_code text)
