@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { createClient } from "@supabase/supabase-js";
 import carrotLogo from "./assets/carrot-logo.png";
@@ -78,16 +78,59 @@ function authErrorMessage(error) {
 
 
 async function translate(text) {
-  const q = cleanText(text); if (!q) return "";
-  const cacheKey = `rot_trans_${q}`;
+  const q = cleanText(text);
+  if (!q) return "";
+  const cacheKey = `rot_trans_${q.toLowerCase()}`;
   try {
-    const cached = localStorage.getItem(cacheKey); if (cached) return cached;
-    const response = await fetchWithTimeout(`https://api.mymemory.translated.net/get?q=${encodeURIComponent(q)}&langpair=en|vi`);
-    if (!response.ok) throw new Error("translation_failed");
-    const data = await response.json(); const result = cleanText(data?.responseData?.translatedText);
-    if (result) localStorage.setItem(cacheKey, result);
-    return result || "Chưa có bản dịch tự động";
-  } catch { return "Chưa có bản dịch tự động"; }
+    const cached = localStorage.getItem(cacheKey);
+    if (cached) return cached;
+  } catch {}
+
+  const providers = [
+    async () => {
+      const response = await fetchWithTimeout(`https://api.mymemory.translated.net/get?q=${encodeURIComponent(q)}&langpair=en|vi`, {}, 9000);
+      if (!response.ok) throw new Error("translation_failed");
+      const data = await response.json();
+      return cleanText(data?.responseData?.translatedText);
+    },
+    async () => {
+      const response = await fetchWithTimeout(`https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=vi&dt=t&q=${encodeURIComponent(q)}`, {}, 9000);
+      if (!response.ok) throw new Error("translation_failed");
+      const data = await response.json();
+      return cleanText(Array.isArray(data?.[0]) ? data[0].map(row => row?.[0]).filter(Boolean).join(" ") : "");
+    },
+  ];
+
+  for (const provider of providers) {
+    try {
+      const result = await provider();
+      if (result && !/^\s*(null|undefined)\s*$/i.test(result)) {
+        try { localStorage.setItem(cacheKey, result); } catch {}
+        return result;
+      }
+    } catch {}
+  }
+  return "Chưa có bản dịch tự động";
+}
+
+function shortMeaning(value) {
+  const text = cleanText(value)
+    .replace(/\([^)]*\)/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!text) return "Chưa có nghĩa";
+  // Keep the first concise sense, but do not split ordinary Vietnamese phrases
+  // at commas/semicolons when the translation itself is already short.
+  const candidates = text.split(/(?:\s*[;]\s*|\s+\/\s+)/).map(part => part.replace(/[.!?]+$/, "").trim()).filter(Boolean);
+  const first = candidates[0] || text;
+  return first.length > 70 ? `${first.slice(0, 67).trim()}…` : first;
+}
+
+async function translateShortMeaning(word, definition = "") {
+  const direct = await translate(word);
+  if (direct && direct !== "Chưa có bản dịch tự động") return shortMeaning(direct).toLowerCase();
+  const fallback = await translate(definition);
+  return fallback && fallback !== "Chưa có bản dịch tự động" ? shortMeaning(fallback).toLowerCase() : "Chưa có nghĩa";
 }
 
 async function fetchWordSuggestions(text) {
@@ -168,7 +211,7 @@ async function fetchDictionary(word) {
       if (!response.ok) { lastError = new Error(`${provider.name}:${response.status}`); continue; }
       const data = await response.json();
       const parsed = provider.parse(data);
-      if (parsed?.definition || parsed?.word) return parsed;
+      if (parsed?.definition) return parsed;
     } catch (error) {
       lastError = error;
     }
@@ -192,9 +235,15 @@ async function fetchCollocations(word) {
   } catch { return []; }
 }
 
-async function enrichWord(word) {
+function normalizeDetailRows(rows) {
+  return (Array.isArray(rows) ? rows : [])
+    .map((row) => ({ en: cleanText(row?.en), vi: cleanText(row?.vi) }))
+    .filter((row) => row.en);
+}
+
+async function enrichWord(word, forceRefresh = false) {
   const key = `rot_dict_${normalizeWord(word)}`;
-  try { const cached = localStorage.getItem(key); if (cached) return JSON.parse(cached); } catch {}
+  if (!forceRefresh) { try { const cached = localStorage.getItem(key); if (cached) return JSON.parse(cached); } catch {} }
   let base;
   try {
     base = await fetchDictionary(word);
@@ -211,11 +260,11 @@ async function enrichWord(word) {
       _enrichmentUnavailable: true,
     };
   }
-  const meaning = await translate(base.definition || base.word);
-  const exampleRows = await Promise.all(base.examples.map(async (example) => ({ en: example, vi: await translate(example) })));
+  const meaning = await translateShortMeaning(base.word, base.definition);
+  const exampleRows = normalizeDetailRows(await Promise.all(base.examples.map(async (example) => ({ en: example, vi: await translate(example) }))));
   const rawCollocations = await fetchCollocations(base.word);
-  const collocations = await Promise.all(rawCollocations.map(async (phrase) => ({ en: phrase, vi: await translate(phrase) })));
-  const result = { id: normalizeWord(base.word), word: base.word, meaning: cap(meaning), partOfSpeech: base.partOfSpeech || "Chưa xác định", ipa: base.phonetic || "", audio: base.audio || "", collocations, examples: exampleRows, definitionEn: cap(base.definition), synonyms: base.synonyms, learnedAt: new Date().toISOString(), reps: 0 };
+  const collocations = normalizeDetailRows(await Promise.all(rawCollocations.map(async (phrase) => ({ en: phrase, vi: await translate(phrase) }))));
+  const result = { id: normalizeWord(base.word), word: base.word, meaning: shortMeaning(meaning), partOfSpeech: base.partOfSpeech || "Chưa xác định", ipa: base.phonetic || "", audio: base.audio || "", collocations, examples: exampleRows, definitionEn: cleanText(base.definition), synonyms: Array.isArray(base.synonyms) ? [...new Set(base.synonyms.map(cleanText).filter(Boolean))].slice(0, 8) : [], learnedAt: new Date().toISOString(), reps: 0 };
   localStorage.setItem(key, JSON.stringify(result));
   return result;
 }
@@ -313,8 +362,8 @@ function Home({ setPage, user, profileUsername }) {
   </section>;
 }
 
-function VocabPage({ vocab, setVocab, user, setPage }) {
-  const [word, setWord] = useState(""); const [suggestions, setSuggestions] = useState([]); const [showSuggestions, setShowSuggestions] = useState(false); const [detail, setDetail] = useState(null); const [loading, setLoading] = useState(false); const [error, setError] = useState(""); const [query, setQuery] = useState(""); const [newTopic, setNewTopic] = useState(""); const [customTopics, setCustomTopics] = useState([]);
+function VocabPage({ vocab, setVocab, user, setPage, vocabError }) {
+  const [word, setWord] = useState(""); const [suggestions, setSuggestions] = useState([]); const [showSuggestions, setShowSuggestions] = useState(false); const [detail, setDetail] = useState(null); const [loading, setLoading] = useState(false); const [error, setError] = useState(""); const [notice, setNotice] = useState(""); const [query, setQuery] = useState(""); const [newTopic, setNewTopic] = useState(""); const [customTopics, setCustomTopics] = useState([]);
   useEffect(() => {
     if (!user) { setCustomTopics([]); return; }
     try {
@@ -351,7 +400,7 @@ function VocabPage({ vocab, setVocab, user, setPage }) {
   };
 
   const addWord = async (event) => {
-    event.preventDefault(); setError("");
+    event.preventDefault(); setError(""); setNotice("");
     if (!user) { setError("Bạn cần đăng nhập để lưu từ vựng. Bạn vẫn có thể xem tra cứu, nhưng từ sẽ không được lưu khi chưa đăng nhập."); return; }
     const clean = normalizeWord(word); if (!clean) { setError("Hãy nhập một từ tiếng Anh."); return; } setLoading(true); setShowSuggestions(false);
     try {
@@ -371,7 +420,7 @@ function VocabPage({ vocab, setVocab, user, setPage }) {
       const normalized = rowToVocab(saved);
       setVocab(current => current.some(item => item.id === normalized.id) ? current.map(item => item.id === normalized.id ? normalized : item) : [normalized, ...current]);
       setDetail(normalized); setWord(""); setSuggestions([]);
-      if (data._enrichmentUnavailable) setError("Đã lưu từ. Hệ thống chưa lấy được dữ liệu tra cứu lúc này; bạn có thể mở lại từ sau để tra cứu bổ sung.");
+      if (data._enrichmentUnavailable) setNotice("Đã lưu từ. Dữ liệu tra cứu chưa phản hồi lúc này; bạn có thể bấm “Tra cứu lại” trong phần chi tiết.");
     } catch (e) {
       const raw = cleanText(e?.message || e || "");
       if (e?.message === "supabase_missing") setError("Chưa cấu hình Supabase. Hãy kiểm tra biến VITE_SUPABASE_URL và VITE_SUPABASE_ANON_KEY.");
@@ -396,32 +445,94 @@ function VocabPage({ vocab, setVocab, user, setPage }) {
     setVocab(current => current.map(v => v.id === normalized.id ? normalized : v));
     if (detail?.id === normalized.id) setDetail(normalized);
   };
+  const refreshWord = async (item) => {
+    if (!user || !supabase) return;
+    try {
+      const data = await enrichWord(item.word, true);
+      const payload = {
+        user_id: user.id, word_id: data.id, word: data.word, meaning: data.meaning,
+        part_of_speech: data.partOfSpeech, ipa: data.ipa, audio: data.audio,
+        collocations: data.collocations || [], examples: data.examples || [],
+        definition_en: data.definitionEn || "", synonyms: data.synonyms || [],
+        learned_at: item.learnedAt, reps: item.reps || 0, topic: item.topic || "Chưa phân loại",
+      };
+      const saved = await saveUserVocab(supabase, payload);
+      if (!saved) throw new Error("save_empty");
+      const normalized = rowToVocab(saved);
+      setVocab(current => current.map(v => v.id === normalized.id ? normalized : v));
+      setDetail(normalized);
+      setError("");
+      setNotice("Đã cập nhật dữ liệu tra cứu cho từ này.");
+    } catch (e) {
+      setError(e?.message === "not_found" ? "Không tìm thấy từ này trong từ điển." : "Chưa thể tra cứu lại lúc này. Hãy thử lại sau.");
+    }
+  };
+
   const removeWord = async (item) => {
     if (!user || !supabase) return;
     const { error: deleteError } = await supabase.from("user_vocab").delete().eq("user_id", user.id).eq("word_id", item.id);
-    if (!deleteError) { setVocab(current => current.filter(v => v.id !== item.id)); if (detail?.id === item.id) setDetail(null); }
+    if (deleteError) { setError("Không thể xóa từ lúc này. Hãy thử lại."); return; }
+    setVocab(current => current.filter(v => v.id !== item.id));
+    if (detail?.id === item.id) setDetail(null);
   };
   const filtered = useMemo(() => { const q = cleanText(query).toLowerCase(); return q ? vocab.filter(item => item.word.toLowerCase().includes(q) || item.meaning.toLowerCase().includes(q)) : vocab; }, [vocab, query]);
   return <section className="page-card">
     <div className="page-heading"><div><div className="eyebrow">KHO CÁ NHÂN</div><h2>Từ vựng</h2><p>Nhập từ tiếng Anh để lấy nghĩa tiếng Việt, từ loại, phiên âm, cụm từ và ví dụ.</p></div><div className="count-badge">{vocab.length} từ đã lưu</div></div>
     {!user && <div className="login-notice">🔐 Muốn lưu từ và dùng ôn tập, hãy <button onClick={() => setPage("account")}>đăng nhập / tạo tài khoản</button>.</div>}
     <form className="add-form" onSubmit={addWord}><div className="word-input-wrap"><input value={word} onChange={e => { setWord(e.target.value); setShowSuggestions(true); }} onFocus={() => setShowSuggestions(true)} onBlur={() => setTimeout(() => setShowSuggestions(false), 150)} placeholder="Ví dụ: environment" aria-label="Từ tiếng Anh" autoComplete="off" />{showSuggestions && suggestions.length > 0 && <div className="word-suggestions" role="listbox">{suggestions.map(item => <button type="button" key={item} onMouseDown={e => e.preventDefault()} onClick={() => { setWord(item); setSuggestions([]); setShowSuggestions(false); }}>{item}</button>)}</div>}</div><button className="primary" disabled={loading || !user}>{loading ? "Đang lưu..." : "＋ Thêm từ"}</button></form>
+    {vocabError && <div className="error-box">{vocabError}</div>}
     {error && <div className="error-box">{error}</div>}
-    {detail && <WordDetail item={detail} onClose={() => setDetail(null)} onDelete={() => removeWord(detail)} />}
+    {notice && <div className="notice-box">{notice}</div>}
+    {detail && <WordDetail item={detail} onClose={() => setDetail(null)} onDelete={() => removeWord(detail)} onRefresh={refreshWord} />}
     <div className="topic-manager">
       <div><h3>Chủ đề của bạn</h3><p className="muted">Tự đặt tên chủ đề để phân loại từ theo cách bạn muốn.</p></div>
       <form onSubmit={createTopic} className="topic-create"><input value={newTopic} onChange={e => setNewTopic(e.target.value)} placeholder="Ví dụ: Từ vựng IELTS Writing" /><button className="secondary" disabled={!user}>＋ Tạo chủ đề</button></form>
       <div className="topic-chips">{topics.map(topic => <span className="topic-chip" key={topic}>{topic}</span>)}</div>
     </div>
     <div className="list-toolbar"><div><h3>Từ đã lưu</h3><span className="muted">Chọn chủ đề ngay trên từng từ.</span></div><input value={query} onChange={e => setQuery(e.target.value)} placeholder="Tìm từ hoặc nghĩa..." /></div>
-    <div className="vocab-list">{filtered.length === 0 && <div className="empty">{user ? "Chưa có từ nào. Hãy thêm từ đầu tiên ở phía trên." : "Đăng nhập để xem kho từ cá nhân."}</div>}{filtered.map(item => <div className="vocab-row" key={item.id} onClick={() => setDetail(item)}><div className="word-main"><b>{item.word}</b><span>{item.partOfSpeech}</span></div><div className="word-meaning">{item.meaning || "Chưa có nghĩa"}</div><div className="word-ipa">{item.ipa || "—"}</div><select className="topic-select" value={item.topic || "Chưa phân loại"} onClick={e => e.stopPropagation()} onChange={e => updateTopic(item, e.target.value)}>{topics.map(topic => <option key={topic} value={topic}>{topic}</option>)}</select><span className="arrow">›</span></div>)}</div>
+    <div className="vocab-list">{filtered.length === 0 && <div className="empty">{user ? "Chưa có từ nào. Hãy thêm từ đầu tiên ở phía trên." : "Đăng nhập để xem kho từ cá nhân."}</div>}{filtered.map(item => <div className="vocab-row" key={item.id} role="button" tabIndex={0} aria-label={`Xem chi tiết từ ${item.word}`} onClick={() => setDetail(item)} onKeyDown={e => { if (e.target.closest("select,button,input")) return; if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setDetail(item); } }}><div className="word-main"><b>{item.word}</b><span>{item.partOfSpeech}</span></div><div className="word-meaning">{item.meaning || "Chưa có nghĩa"}</div><div className="word-ipa">{item.ipa || "—"}</div><select className="topic-select" value={item.topic || "Chưa phân loại"} onClick={e => e.stopPropagation()} onChange={e => updateTopic(item, e.target.value)}>{topics.map(topic => <option key={topic} value={topic}>{topic}</option>)}</select><span className="arrow">›</span></div>)}</div>
   </section>;
 }
 
-function WordDetail({ item, onClose, onDelete }) {
+function WordDetail({ item, onClose, onDelete, onRefresh }) {
   const [translated, setTranslated] = useState({});
-  useEffect(() => { let alive = true; (async () => { const all = [...(item.collocations || []), ...(item.examples || [])]; const values = {}; for (const row of all) values[row.en] = row.vi || await translate(row.en); if (alive) setTranslated(values); })(); return () => { alive = false; }; }, [item]);
-  return <div className="detail-panel"><div className="detail-head"><div><h3>{item.word}</h3><div className="meta-line">{item.partOfSpeech || "Chưa xác định"}{item.ipa ? <span className="ipa-line">{item.ipa}</span> : null}</div></div><div className="detail-actions"><button className="icon-btn" onClick={onClose}>×</button>{onDelete && <button className="delete-btn" onClick={onDelete}>Xóa từ</button>}</div></div><div className="meaning-big">{item.meaning || "Chưa có nghĩa"}</div><div className="detail-topic"><b>Chủ đề:</b> {item.topic || "Chưa phân loại"}</div>{item.audio && <button className="audio-btn" onClick={() => new Audio(item.audio).play()}>🔊 Nghe phát âm</button>}<div className="detail-grid"><div><h4>Cụm từ</h4>{item.collocations?.length ? item.collocations.map(row => <div className="hover-line" key={row.en} title={translated[row.en] || "Đang dịch..."}><b>{row.en}</b><small>{translated[row.en] || "Đang dịch..."}</small></div>) : <div className="muted">Chưa lấy được cụm từ tự động.</div>}</div><div><h4>Ví dụ</h4>{item.examples?.length ? item.examples.map(row => <div className="hover-line example" key={row.en} title={translated[row.en] || "Đang dịch..."}><b>{row.en}</b><small>{translated[row.en] || "Đang dịch..."}</small></div>) : <div className="muted">Chưa có ví dụ.</div>}</div></div>{item.definitionEn && <div className="english-definition"><b>Giải thích tiếng Anh:</b> {item.definitionEn}</div>}</div>;
+  const [refreshing, setRefreshing] = useState(false);
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      const rows = [...(item.collocations || []), ...(item.examples || [])];
+      const values = {};
+      for (const row of rows) {
+        const existing = cleanText(row?.vi);
+        values[row.en] = existing && existing !== "Chưa có bản dịch tự động" ? existing : await translate(row.en);
+      }
+      if (alive) setTranslated(values);
+    })();
+    return () => { alive = false; };
+  }, [item]);
+  const refresh = async () => {
+    if (!onRefresh || refreshing) return;
+    setRefreshing(true);
+    try { await onRefresh(item); } finally { setRefreshing(false); }
+  };
+  return <div className="detail-panel">
+    <div className="detail-head">
+      <div><h3>{item.word}</h3><div className="detail-subtitle">Thông tin từ vựng</div></div>
+      <div className="detail-actions"><button className="refresh-btn" onClick={refresh} disabled={refreshing}>{refreshing ? "Đang tra..." : "↻ Tra cứu lại"}</button><button className="icon-btn" onClick={onClose}>×</button>{onDelete && <button className="delete-btn" onClick={onDelete}>Xóa từ</button>}</div>
+    </div>
+    <div className="detail-facts">
+      <div><span>Từ loại</span><b>{item.partOfSpeech || "Chưa xác định"}</b></div>
+      <div><span>Phiên âm</span><b>{item.ipa || "—"}</b></div>
+      <div className="detail-meaning"><span>Nghĩa</span><b>{shortMeaning(item.meaning)}</b></div>
+    </div>
+    <div className="detail-topic"><b>Chủ đề:</b> {item.topic || "Chưa phân loại"}</div>
+    {item.audio && <button className="audio-btn" onClick={() => { const audio = new Audio(item.audio); audio.play().catch(() => {}); }}>🔊 Nghe phát âm</button>}
+    <div className="detail-grid">
+      <div><h4>Cụm từ liên quan</h4>{item.collocations?.length ? item.collocations.map(row => <div className="hover-line" key={row.en}><b>{row.en}</b><small>{translated[row.en] || "Đang dịch..."}</small></div>) : <div className="muted">Chưa lấy được cụm từ tự động.</div>}</div>
+      <div><h4>Ví dụ liên quan</h4>{item.examples?.length ? item.examples.map(row => <div className="hover-line example" key={row.en}><b>{row.en}</b><small>{translated[row.en] || "Đang dịch..."}</small></div>) : <div className="muted">Chưa có ví dụ.</div>}</div>
+    </div>
+    {item.definitionEn && <div className="english-definition"><b>Giải thích tiếng Anh:</b> {item.definitionEn}</div>}
+  </div>;
 }
 
 function ReviewPage({ vocab, user, setPage }) {
@@ -511,38 +622,60 @@ function AccountPage({ user, profileUsername, authReady, onSignedIn, onSignOut }
   return <section className="page-card account-card"><img src={carrotLogo} alt="Cà rốt" /><div className="eyebrow">TÀI KHOẢN</div><h2>{mode === "login" ? "Đăng nhập" : "Tạo tài khoản"}</h2><p>{mode === "login" ? "Chỉ cần nhập Gmail/email hoặc tên đăng nhập, không cần nhập cả hai." : "Tạo tài khoản bằng tên đăng nhập, Gmail/email và mật khẩu. Mỗi email và tên đăng nhập chỉ dùng cho một tài khoản."}</p><form className="account-form" onSubmit={submit}>{mode === "signup" && <input value={username} onChange={e => setUsername(e.target.value)} placeholder="Tên đăng nhập" minLength={3} maxLength={30} autoComplete="username" required />}{mode === "signup" ? <input type="email" value={email} onChange={e => setEmail(e.target.value)} placeholder="Gmail / Email" autoComplete="email" required /> : <input type="text" value={loginValue} onChange={e => setLoginValue(e.target.value)} placeholder="Gmail / Email hoặc tên đăng nhập" autoComplete="username" required />}{<input type="password" value={password} onChange={e => setPassword(e.target.value)} placeholder="Mật khẩu (tối thiểu 6 ký tự)" minLength={6} autoComplete={mode === "login" ? "current-password" : "new-password"} required />}<button className="primary" disabled={loading}>{loading ? "Đang xử lý..." : mode === "login" ? "Đăng nhập" : "Tạo tài khoản"}</button></form>{error && <div className="error-box">{error}</div>}{message && <div className="success-box">{message}</div>}<button className="link-btn" onClick={() => { setMode(mode === "login" ? "signup" : "login"); setError(""); setMessage(""); }}>{mode === "login" ? "Chưa có tài khoản? Tạo tài khoản" : "Đã có tài khoản? Đăng nhập"}</button></section>;
 }
 
-function rowToVocab(row) { return { id: row.word_id, word: row.word, meaning: row.meaning || "", partOfSpeech: row.part_of_speech || "Chưa xác định", ipa: row.ipa || "", audio: row.audio || "", collocations: row.collocations || [], examples: row.examples || [], definitionEn: row.definition_en || "", synonyms: row.synonyms || [], learnedAt: row.learned_at, reps: row.reps || 0, topic: row.topic || "Chưa phân loại" }; }
+function rowToVocab(row) {
+  return {
+    id: normalizeWord(row?.word_id || row?.word),
+    word: cleanText(row?.word || row?.word_id),
+    meaning: cleanText(row?.meaning),
+    partOfSpeech: cleanText(row?.part_of_speech) || "Chưa xác định",
+    ipa: cleanText(row?.ipa),
+    audio: cleanText(row?.audio),
+    collocations: normalizeDetailRows(row?.collocations),
+    examples: normalizeDetailRows(row?.examples),
+    definitionEn: cleanText(row?.definition_en),
+    synonyms: Array.isArray(row?.synonyms) ? [...new Set(row.synonyms.map(cleanText).filter(Boolean))].slice(0, 8) : [],
+    learnedAt: row?.learned_at,
+    reps: Number.isFinite(Number(row?.reps)) ? Math.max(0, Number(row.reps)) : 0,
+    topic: cleanText(row?.topic) || "Chưa phân loại",
+  };
+}
 
 function App() {
-  const [page, setPage] = useState("home"); const [user, setUser] = useState(null); const [profileUsername, setProfileUsername] = useState(""); const [authReady, setAuthReady] = useState(false); const [vocab, setVocab] = useState([]);
-  const applySession = async (session) => {
+  const [page, setPage] = useState("home"); const [user, setUser] = useState(null); const [profileUsername, setProfileUsername] = useState(""); const [authReady, setAuthReady] = useState(false); const [vocab, setVocab] = useState([]); const [vocabError, setVocabError] = useState("");
+  const authVersion = useRef(0);
+  const applySession = async (session, expectedVersion = authVersion.current) => {
     const nextUser = session?.user || null;
+    if (expectedVersion !== authVersion.current) return;
     setUser(nextUser);
     if (!nextUser || !supabase) { setProfileUsername(""); return; }
     const metadataName = cleanText(nextUser.user_metadata?.username);
-    if (metadataName) setProfileUsername(metadataName);
+    setProfileUsername(metadataName);
     const { data } = await supabase.from("profiles").select("username").eq("user_id", nextUser.id).maybeSingle();
+    if (expectedVersion !== authVersion.current) return;
     if (data?.username) setProfileUsername(data.username);
   };
   useEffect(() => {
     if (!supabase) { setAuthReady(true); return undefined; }
     let mounted = true;
+    const initialVersion = authVersion.current;
     supabase.auth.getSession().then(async ({ data }) => {
-      if (!mounted) return;
-      await applySession(data.session);
-      if (mounted) setAuthReady(true);
+      if (!mounted || initialVersion !== authVersion.current) return;
+      await applySession(data.session, initialVersion);
+      if (mounted && initialVersion === authVersion.current) setAuthReady(true);
     });
     const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => {
-      // Do not await database queries directly inside the auth callback.
+      authVersion.current += 1;
+      const version = authVersion.current;
+      // Keep auth callbacks synchronous; fetch the profile after the callback.
       setUser(session?.user || null);
-      if (!session?.user) setProfileUsername("");
+      setProfileUsername(cleanText(session?.user?.user_metadata?.username));
       setAuthReady(true);
-      setTimeout(() => { if (mounted && session?.user) applySession(session); }, 0);
+      setTimeout(() => { if (mounted && session?.user && version === authVersion.current) applySession(session, version); }, 0);
     });
     return () => { mounted = false; listener.subscription.unsubscribe(); };
   }, []);
   useEffect(() => {
-    if (!user || !supabase) { setVocab([]); return; }
+    if (!user || !supabase) { setVocab([]); setVocabError(""); return; }
     let alive = true;
     (async () => {
       // Supabase REST commonly returns at most 1,000 rows per request.
@@ -550,19 +683,23 @@ function App() {
       const pageSize = 1000;
       let from = 0;
       const allRows = [];
-      while (alive) {
-        const { data, error } = await supabase
-          .from("user_vocab")
-          .select("*")
-          .order("learned_at", { ascending: false })
-          .range(from, from + pageSize - 1);
-        if (error) break;
-        const rows = data || [];
-        allRows.push(...rows);
-        if (rows.length < pageSize) break;
-        from += pageSize;
+      try {
+        while (alive) {
+          const { data, error } = await supabase
+            .from("user_vocab")
+            .select("*")
+            .order("learned_at", { ascending: false })
+            .range(from, from + pageSize - 1);
+          if (error) throw error;
+          const rows = data || [];
+          allRows.push(...rows);
+          if (rows.length < pageSize) break;
+          from += pageSize;
+        }
+        if (alive) { setVocab(allRows.map(rowToVocab)); setVocabError(""); }
+      } catch (error) {
+        if (alive) setVocabError("Không thể tải kho từ lúc này. Hãy kiểm tra kết nối Supabase rồi tải lại trang.");
       }
-      if (alive) setVocab(allRows.map(rowToVocab));
     })();
     return () => { alive = false; };
   }, [user]);
@@ -571,7 +708,7 @@ function App() {
     setUser(null); setProfileUsername(""); setVocab([]); setPage("home");
   };
   const goAccount = () => setPage("account");
-  return <div className="carrot-app"><Header page={page} setPage={setPage} user={user} onAccount={goAccount} /><main className="content">{page === "home" && <Home setPage={setPage} user={user} profileUsername={profileUsername} />}{page === "vocab" && <VocabPage vocab={vocab} setVocab={setVocab} user={user} setPage={setPage} />}{page === "review" && <ReviewPage vocab={vocab} user={user} setPage={setPage} />}{page === "account" && <AccountPage user={user} profileUsername={profileUsername} authReady={authReady} onSignedIn={user => applySession({ user })} onSignOut={signOut} />} {page === "link" && <LinkPage user={user} />}</main><footer>🥕 Học tiếng Anh cùng Rốt</footer></div>;
+  return <div className="carrot-app"><Header page={page} setPage={setPage} user={user} onAccount={goAccount} /><main className="content">{page === "home" && <Home setPage={setPage} user={user} profileUsername={profileUsername} />}{page === "vocab" && <VocabPage vocab={vocab} setVocab={setVocab} user={user} setPage={setPage} vocabError={vocabError} />}{page === "review" && <ReviewPage vocab={vocab} user={user} setPage={setPage} />}{page === "account" && <AccountPage user={user} profileUsername={profileUsername} authReady={authReady} onSignedIn={user => applySession({ user })} onSignOut={signOut} />} {page === "link" && <LinkPage user={user} />}</main><footer>🥕 Học tiếng Anh cùng Rốt</footer></div>;
 }
 
 createRoot(document.getElementById("root")).render(<App />);
