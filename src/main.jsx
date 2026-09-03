@@ -104,24 +104,79 @@ async function fetchWordSuggestions(text) {
 }
 
 async function fetchDictionary(word) {
-  let response;
-  try {
-    response = await fetchWithTimeout(`https://api.dictionaryapi.dev/api/v2/entries/en/${encodeURIComponent(word)}`);
-  } catch (error) {
-    const wrapped = new Error("dictionary_unavailable");
-    wrapped.cause = error;
-    throw wrapped;
+  const encoded = encodeURIComponent(word);
+  const providers = [
+    {
+      name: "freedictionaryapi",
+      url: `https://freedictionaryapi.com/api/v1/entries/en/${encoded}`,
+      parse: (data) => {
+        const entries = Array.isArray(data?.entries) ? data.entries : [];
+        const first = entries[0] || {};
+        const senses = entries.flatMap((entry) => Array.isArray(entry.senses) ? entry.senses : []);
+        const definition = cleanText((senses[0] || {}).definition);
+        const examples = senses.flatMap((sense) => Array.isArray(sense.examples) ? sense.examples.map(cleanText) : []).filter(Boolean);
+        const synonyms = senses.flatMap((sense) => Array.isArray(sense.synonyms) ? sense.synonyms.map(cleanText) : []).filter(Boolean);
+        const pronunciations = entries.flatMap((entry) => Array.isArray(entry.pronunciations) ? entry.pronunciations : []);
+        const ipa = pronunciations.find((p) => p?.type === "ipa" && p?.text)?.text || pronunciations.find((p) => p?.text)?.text || "";
+        const audio = pronunciations.find((p) => p?.audio)?.audio || "";
+        return {
+          word: cleanText(data?.word || word),
+          phonetic: formatIpa(ipa), audio,
+          partOfSpeech: cap(first.partOfSpeech || ""),
+          definition,
+          examples: [...new Set(examples)].slice(0, 3),
+          synonyms: [...new Set(synonyms)].slice(0, 8),
+        };
+      },
+    },
+    {
+      name: "dictionaryapi",
+      url: `https://api.dictionaryapi.dev/api/v2/entries/en/${encoded}`,
+      parse: (data) => {
+        const entry = data?.[0] || {};
+        const meanings = entry.meanings || [];
+        const first = meanings[0] || {};
+        const definition = cleanText(first.definitions?.[0]?.definition);
+        const examples = meanings.flatMap((m) => (m.definitions || []).map((d) => cleanText(d.example)).filter(Boolean));
+        const phonetic = entry.phonetic || entry.phonetics?.find((p) => p.text)?.text || "";
+        const audio = entry.phonetics?.find((p) => p.audio)?.audio || "";
+        const partOfSpeech = first.partOfSpeech || meanings.find((m) => m.partOfSpeech)?.partOfSpeech || "";
+        const synonyms = meanings.flatMap((m) => m.synonyms || []);
+        return { word: cleanText(entry.word || word), phonetic: formatIpa(phonetic), audio, partOfSpeech: cap(partOfSpeech), definition, examples: [...new Set(examples)].slice(0, 3), synonyms: [...new Set(synonyms)].slice(0, 8) };
+      },
+    },
+    {
+      name: "suvankar",
+      url: `https://api.suvankar.cc/dictionaryapi/v1/definitions/en/${encoded}?compact=true`,
+      parse: (data) => {
+        const meanings = Array.isArray(data?.meanings) ? data.meanings : [];
+        const first = meanings[0] || {};
+        const definitions = Array.isArray(first.definitions) ? first.definitions.map(cleanText).filter(Boolean) : [];
+        const examples = Array.isArray(first.examples) ? first.examples.map(cleanText).filter(Boolean) : [];
+        const synonyms = meanings.flatMap((m) => Array.isArray(m.synonyms) ? m.synonyms.map(cleanText) : []).filter(Boolean);
+        return { word: cleanText(data?.word || word), phonetic: formatIpa(data?.ipa || ""), audio: "", partOfSpeech: cap(first.partOfSpeech || ""), definition: definitions[0] || "", examples: [...new Set(examples)].slice(0, 3), synonyms: [...new Set(synonyms)].slice(0, 8) };
+      },
+    },
+  ];
+
+  let sawNotFound = false;
+  let lastError = null;
+  for (const provider of providers) {
+    try {
+      const response = await fetchWithTimeout(provider.url, {}, 9000);
+      if (response.status === 404) { sawNotFound = true; continue; }
+      if (!response.ok) { lastError = new Error(`${provider.name}:${response.status}`); continue; }
+      const data = await response.json();
+      const parsed = provider.parse(data);
+      if (parsed?.definition || parsed?.word) return parsed;
+    } catch (error) {
+      lastError = error;
+    }
   }
-  if (response.status === 404) throw new Error("not_found");
-  if (!response.ok) throw new Error("dictionary_unavailable");
-  const data = await response.json(); const entry = data?.[0] || {}; const meanings = entry.meanings || [];
-  const first = meanings[0] || {};
-  const definition = cleanText(first.definitions?.[0]?.definition);
-  const allExamples = meanings.flatMap((m) => (m.definitions || []).map((d) => cleanText(d.example)).filter(Boolean));
-  const phonetic = entry.phonetic || entry.phonetics?.find((p) => p.text)?.text || "";
-  const audio = entry.phonetics?.find((p) => p.audio)?.audio || "";
-  const partOfSpeech = first.partOfSpeech || meanings.find((m) => m.partOfSpeech)?.partOfSpeech || "";
-  return { word: entry.word || word, phonetic: formatIpa(phonetic), audio, partOfSpeech: cap(partOfSpeech), definition, examples: [...new Set(allExamples)].slice(0, 3), synonyms: [...new Set(meanings.flatMap((m) => m.synonyms || []))].slice(0, 8) };
+  if (sawNotFound && !lastError) throw new Error("not_found");
+  const wrapped = new Error("dictionary_unavailable");
+  wrapped.cause = lastError;
+  throw wrapped;
 }
 
 async function fetchCollocations(word) {
@@ -316,7 +371,7 @@ function VocabPage({ vocab, setVocab, user, setPage }) {
       const normalized = rowToVocab(saved);
       setVocab(current => current.some(item => item.id === normalized.id) ? current.map(item => item.id === normalized.id ? normalized : item) : [normalized, ...current]);
       setDetail(normalized); setWord(""); setSuggestions([]);
-      if (data._enrichmentUnavailable) setError("Đã lưu từ, nhưng dịch vụ tra cứu đang tạm thời không phản hồi. Bạn vẫn có thể dùng từ này và tra cứu lại sau.");
+      if (data._enrichmentUnavailable) setError("Đã lưu từ. Hệ thống chưa lấy được dữ liệu tra cứu lúc này; bạn có thể mở lại từ sau để tra cứu bổ sung.");
     } catch (e) {
       const raw = cleanText(e?.message || e || "");
       if (e?.message === "supabase_missing") setError("Chưa cấu hình Supabase. Hãy kiểm tra biến VITE_SUPABASE_URL và VITE_SUPABASE_ANON_KEY.");
