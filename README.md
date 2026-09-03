@@ -1,4 +1,4 @@
-## v4.5.2
+## v4.5.4
 - Cập nhật avatar cà rốt trên thanh điều hướng.
 - Đăng nhập bằng một ô: Gmail/email hoặc tên đăng nhập.
 - Hiển thị lỗi rate limit email rõ ràng và chống gửi đăng ký liên tiếp trong 30 giây.

@@ -17,6 +17,17 @@ const normalizeWord = (value) => cleanText(value).toLowerCase();
 const formatIpa = (value) => { const text = cleanText(value).replace(/^\/+|\/+$/g, ""); return text ? `/${text}/` : ""; };
 const escapeRegExp = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
+const FETCH_TIMEOUT_MS = 12000;
+async function fetchWithTimeout(url, options = {}, timeout = FETCH_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeout);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function authErrorMessage(error) {
   const raw = cleanText(error?.message || error || "");
   const lower = raw.toLowerCase();
@@ -37,7 +48,7 @@ async function translate(text) {
   const cacheKey = `rot_trans_${q}`;
   try {
     const cached = localStorage.getItem(cacheKey); if (cached) return cached;
-    const response = await fetch(`https://api.mymemory.translated.net/get?q=${encodeURIComponent(q)}&langpair=en|vi`);
+    const response = await fetchWithTimeout(`https://api.mymemory.translated.net/get?q=${encodeURIComponent(q)}&langpair=en|vi`);
     if (!response.ok) throw new Error("translation_failed");
     const data = await response.json(); const result = cleanText(data?.responseData?.translatedText);
     if (result) localStorage.setItem(cacheKey, result);
@@ -45,8 +56,21 @@ async function translate(text) {
   } catch { return "Chưa có bản dịch tự động"; }
 }
 
+async function fetchWordSuggestions(text) {
+  const q = cleanText(text);
+  if (!q) return [];
+  try {
+    const response = await fetchWithTimeout(`https://api.datamuse.com/sug?s=${encodeURIComponent(q)}&lang=en&max=8`);
+    if (!response.ok) return [];
+    const data = await response.json();
+    return [...new Set((Array.isArray(data) ? data : []).map(item => cleanText(item.word)).filter(Boolean))].slice(0, 8);
+  } catch {
+    return [];
+  }
+}
+
 async function fetchDictionary(word) {
-  const response = await fetch(`https://api.dictionaryapi.dev/api/v2/entries/en/${encodeURIComponent(word)}`);
+  const response = await fetchWithTimeout(`https://api.dictionaryapi.dev/api/v2/entries/en/${encodeURIComponent(word)}`);
   if (!response.ok) throw new Error("not_found");
   const data = await response.json(); const entry = data?.[0] || {}; const meanings = entry.meanings || [];
   const first = meanings[0] || {};
@@ -65,7 +89,7 @@ async function fetchCollocations(word) {
       `https://api.datamuse.com/words?rel_jja=${encodeURIComponent(word)}&max=5`,
       `https://api.datamuse.com/words?rel_trg=${encodeURIComponent(word)}&max=5`,
     ];
-    const results = await Promise.all(requests.map((url) => fetch(url).then((r) => (r.ok ? r.json() : []))));
+    const results = await Promise.all(requests.map((url) => fetchWithTimeout(url).then((r) => (r.ok ? r.json() : []))));
     const words = results.flat().map((item) => cleanText(item.word)).filter(Boolean);
     return [...new Set(words)].filter((item) => item.toLowerCase() !== word.toLowerCase()).slice(0, 8).map((item) => `${item} ${word}`);
   } catch { return []; }
@@ -164,12 +188,12 @@ function Header({ page, setPage, user, onAccount }) {
   </header>;
 }
 
-function Home({ setPage, user }) {
+function Home({ setPage, user, profileUsername }) {
   return <section className="home-card">
     <img className="hero-carrot" src={carrotLogo} alt="Cà rốt" />
     <div className="eyebrow">HỌC TIẾNG ANH MỖI NGÀY</div>
     <h1>Học tiếng Anh<br />cùng Rốt</h1>
-    <p>{user ? `Xin chào ${user.user_metadata?.username || user.email}.` : "Đăng nhập để lưu từ vựng và ôn tập trên mọi lần mở ứng dụng."}</p>
+    <p>{user ? `Xin chào ${profileUsername || user.user_metadata?.username || "bạn"}.` : "Đăng nhập để lưu từ vựng và ôn tập trên mọi lần mở ứng dụng."}</p>
     <div className="home-actions">
       <button className="primary" onClick={() => setPage("vocab")}>＋ Thêm từ vựng</button>
       <button className="secondary" onClick={() => setPage("review")}>▶ Ôn tập ngay</button>
@@ -178,7 +202,7 @@ function Home({ setPage, user }) {
 }
 
 function VocabPage({ vocab, setVocab, user, setPage }) {
-  const [word, setWord] = useState(""); const [detail, setDetail] = useState(null); const [loading, setLoading] = useState(false); const [error, setError] = useState(""); const [query, setQuery] = useState(""); const [newTopic, setNewTopic] = useState(""); const [customTopics, setCustomTopics] = useState([]);
+  const [word, setWord] = useState(""); const [suggestions, setSuggestions] = useState([]); const [showSuggestions, setShowSuggestions] = useState(false); const [detail, setDetail] = useState(null); const [loading, setLoading] = useState(false); const [error, setError] = useState(""); const [query, setQuery] = useState(""); const [newTopic, setNewTopic] = useState(""); const [customTopics, setCustomTopics] = useState([]);
   useEffect(() => {
     if (!user) { setCustomTopics([]); return; }
     try {
@@ -190,6 +214,17 @@ function VocabPage({ vocab, setVocab, user, setPage }) {
     const fromWords = vocab.map(item => cleanText(item.topic)).filter(t => t && t !== "Chưa phân loại");
     return [...new Set([...DEFAULT_TOPICS, ...customTopics, ...fromWords])];
   }, [vocab, customTopics]);
+  useEffect(() => {
+    const q = cleanText(word);
+    if (q.length < 1) { setSuggestions([]); return undefined; }
+    let alive = true;
+    const timer = setTimeout(async () => {
+      const next = await fetchWordSuggestions(q);
+      if (alive) setSuggestions(next.filter(item => normalizeWord(item) !== q.toLowerCase()));
+    }, 250);
+    return () => { alive = false; clearTimeout(timer); };
+  }, [word, user]);
+
   const createTopic = (event) => {
     event.preventDefault();
     if (!user) { setError("Bạn cần đăng nhập để tạo chủ đề."); return; }
@@ -206,7 +241,7 @@ function VocabPage({ vocab, setVocab, user, setPage }) {
   const addWord = async (event) => {
     event.preventDefault(); setError("");
     if (!user) { setError("Bạn cần đăng nhập để lưu từ vựng. Bạn vẫn có thể xem tra cứu, nhưng từ sẽ không được lưu khi chưa đăng nhập."); return; }
-    const clean = normalizeWord(word); if (!clean) return; setLoading(true);
+    const clean = normalizeWord(word); if (!clean) { setError("Hãy nhập một từ tiếng Anh."); return; } setLoading(true); setShowSuggestions(false);
     try {
       const data = await enrichWord(clean);
       const existing = vocab.find(item => item.id === data.id);
@@ -219,13 +254,24 @@ function VocabPage({ vocab, setVocab, user, setPage }) {
         topic: existing?.topic || "Chưa phân loại",
       };
       if (!supabase) throw new Error("supabase_missing");
-      const { data: saved, error: saveError } = await supabase.from("user_vocab").upsert(payload, { onConflict: "user_id,word_id" }).select().single();
+      // Save through a small SECURITY DEFINER RPC. This avoids false failures from
+      // PostgREST upsert/RLS/trigger interactions while keeping the user_id server-side.
+      const { data: saved, error: saveError } = await supabase.rpc("save_user_vocab", { vocab_payload: payload });
       if (saveError) throw saveError;
+      if (!saved) throw new Error("save_empty");
       const normalized = rowToVocab(saved);
       setVocab(current => current.some(item => item.id === normalized.id) ? current.map(item => item.id === normalized.id ? normalized : item) : [normalized, ...current]);
-      setDetail(normalized); setWord("");
+      setDetail(normalized); setWord(""); setSuggestions([]);
     } catch (e) {
-      setError(e?.message === "supabase_missing" ? "Chưa cấu hình Supabase. Hãy điền VITE_SUPABASE_URL và VITE_SUPABASE_ANON_KEY trong file .env.local." : "Không thể lưu từ. Hãy kiểm tra từ tiếng Anh, kết nối mạng và tài khoản rồi thử lại.");
+      const raw = cleanText(e?.message || e || "");
+      if (e?.message === "supabase_missing") setError("Chưa cấu hình Supabase. Hãy kiểm tra biến VITE_SUPABASE_URL và VITE_SUPABASE_ANON_KEY.");
+      else if (e?.message === "not_found") setError("Không tìm thấy từ này trong từ điển. Hãy chọn một gợi ý bên dưới hoặc kiểm tra chính tả.");
+      else if (/row-level security|permission denied|violates row-level security/i.test(raw)) setError("Supabase đang từ chối lưu từ. Hãy chạy lại supabase/schema.sql rồi thử lại.");
+      else if (/duplicate key|unique constraint/i.test(raw)) setError("Từ này đã có trong kho. Nếu bạn muốn cập nhật thông tin, hãy thử lại sau vài giây.");
+      else if (/save_empty/i.test(raw)) setError("Supabase không trả về dữ liệu sau khi lưu. Hãy thử lại.");
+      else if (/function .*save_user_vocab.*does not exist|could not find the function/i.test(raw)) setError("Database chưa có hàm lưu từ mới. Hãy chạy lại file supabase/schema.sql trên Supabase rồi thử lại.");
+      else if (/failed to fetch|networkerror|load failed|abort|signal is aborted|fetch/i.test(raw)) setError("Kết nối tới dịch vụ tra cứu hoặc Supabase bị gián đoạn. Hãy kiểm tra mạng rồi thử lại.");
+      else setError(raw ? `Không thể lưu từ: ${raw}` : "Không thể lưu từ. Hãy kiểm tra kết nối mạng, Supabase và tài khoản rồi thử lại.");
     }
     finally { setLoading(false); }
   };
@@ -247,7 +293,7 @@ function VocabPage({ vocab, setVocab, user, setPage }) {
   return <section className="page-card">
     <div className="page-heading"><div><div className="eyebrow">KHO CÁ NHÂN</div><h2>Từ vựng</h2><p>Nhập từ tiếng Anh để lấy nghĩa tiếng Việt, từ loại, phiên âm, cụm từ và ví dụ.</p></div><div className="count-badge">{vocab.length} từ đã lưu</div></div>
     {!user && <div className="login-notice">🔐 Muốn lưu từ và dùng ôn tập, hãy <button onClick={() => setPage("account")}>đăng nhập / tạo tài khoản</button>.</div>}
-    <form className="add-form" onSubmit={addWord}><input value={word} onChange={e => setWord(e.target.value)} placeholder="Ví dụ: environment" aria-label="Từ tiếng Anh" /><button className="primary" disabled={loading || !user}>{loading ? "Đang lưu..." : "＋ Thêm từ"}</button></form>
+    <form className="add-form" onSubmit={addWord}><div className="word-input-wrap"><input value={word} onChange={e => { setWord(e.target.value); setShowSuggestions(true); }} onFocus={() => setShowSuggestions(true)} onBlur={() => setTimeout(() => setShowSuggestions(false), 150)} placeholder="Ví dụ: environment" aria-label="Từ tiếng Anh" autoComplete="off" />{showSuggestions && suggestions.length > 0 && <div className="word-suggestions" role="listbox">{suggestions.map(item => <button type="button" key={item} onMouseDown={e => e.preventDefault()} onClick={() => { setWord(item); setSuggestions([]); setShowSuggestions(false); }}>{item}</button>)}</div>}</div><button className="primary" disabled={loading || !user}>{loading ? "Đang lưu..." : "＋ Thêm từ"}</button></form>
     {error && <div className="error-box">{error}</div>}
     {detail && <WordDetail item={detail} onClose={() => setDetail(null)} onDelete={() => removeWord(detail)} />}
     <div className="topic-manager">
@@ -302,7 +348,7 @@ function LinkPage({ user }) {
   return <section className="page-card link-card"><div className="eyebrow">LIÊN KẾT</div><h2>Kết nối kho từ vựng</h2><p>Dùng mã của một tài khoản khác để chia sẻ kho. Từ mới và chủ đề được gán cho từng từ sẽ được đồng bộ giữa các tài khoản đã liên kết.</p><div className="my-code"><span>Mã liên kết của bạn</span><b>{myCode || "Đang tạo..."}</b></div><form className="add-form link-form" onSubmit={link}><input value={code} onChange={e => setCode(e.target.value.toUpperCase())} placeholder="Nhập mã liên kết của tài khoản kia" maxLength={8} required /><button className="primary" disabled={loading}>{loading ? "Đang liên kết..." : "🔗 Liên kết"}</button></form>{error && <div className="error-box">{error}</div>}{message && <div className="success-box">{message}</div>}<div className="sync-note"><b>Đồng bộ tự động</b><p>• Thêm một từ → từ đó được thêm vào kho của các tài khoản liên kết.<br/>• Đổi chủ đề của một từ → chủ đề được cập nhật cho các tài khoản liên kết.</p></div></section>;
 }
 
-function AccountPage({ user, authReady, onSignedIn, onSignOut }) {
+function AccountPage({ user, profileUsername, authReady, onSignedIn, onSignOut }) {
   const [mode, setMode] = useState("login");
   const [username, setUsername] = useState("");
   const [email, setEmail] = useState("");
@@ -349,15 +395,40 @@ function AccountPage({ user, authReady, onSignedIn, onSignOut }) {
     finally { setLoading(false); }
   };
   if (!authReady) return <section className="page-card account-card"><h2>Tài khoản</h2><p>Đang kiểm tra phiên đăng nhập...</p></section>;
-  if (user) return <section className="page-card account-card"><img src={carrotLogo} alt="Cà rốt" /><div className="eyebrow">TÀI KHOẢN</div><h2>Xin chào!</h2><p>Tên đăng nhập: <b>{user.user_metadata?.username || "—"}</b><br />Email: <b>{user.email}</b></p><button className="primary" onClick={onSignOut}>Đăng xuất</button></section>;
+  if (user) return <section className="page-card account-card"><img src={carrotLogo} alt="Cà rốt" /><div className="eyebrow">TÀI KHOẢN</div><h2>Xin chào!</h2><p>Tên đăng nhập: <b>{profileUsername || user.user_metadata?.username || "Chưa có"}</b><br />Email: <b>{user.email}</b></p><button className="primary" onClick={onSignOut}>Đăng xuất</button></section>;
   return <section className="page-card account-card"><img src={carrotLogo} alt="Cà rốt" /><div className="eyebrow">TÀI KHOẢN</div><h2>{mode === "login" ? "Đăng nhập" : "Tạo tài khoản"}</h2><p>{mode === "login" ? "Chỉ cần nhập Gmail/email hoặc tên đăng nhập, không cần nhập cả hai." : "Tạo tài khoản bằng tên đăng nhập, Gmail/email và mật khẩu. Mỗi email và tên đăng nhập chỉ dùng cho một tài khoản."}</p><form className="account-form" onSubmit={submit}>{mode === "signup" && <input value={username} onChange={e => setUsername(e.target.value)} placeholder="Tên đăng nhập" minLength={3} maxLength={30} autoComplete="username" required />}{mode === "signup" ? <input type="email" value={email} onChange={e => setEmail(e.target.value)} placeholder="Gmail / Email" autoComplete="email" required /> : <input type="text" value={loginValue} onChange={e => setLoginValue(e.target.value)} placeholder="Gmail / Email hoặc tên đăng nhập" autoComplete="username" required />}{<input type="password" value={password} onChange={e => setPassword(e.target.value)} placeholder="Mật khẩu (tối thiểu 6 ký tự)" minLength={6} autoComplete={mode === "login" ? "current-password" : "new-password"} required />}<button className="primary" disabled={loading}>{loading ? "Đang xử lý..." : mode === "login" ? "Đăng nhập" : "Tạo tài khoản"}</button></form>{error && <div className="error-box">{error}</div>}{message && <div className="success-box">{message}</div>}<button className="link-btn" onClick={() => { setMode(mode === "login" ? "signup" : "login"); setError(""); setMessage(""); }}>{mode === "login" ? "Chưa có tài khoản? Tạo tài khoản" : "Đã có tài khoản? Đăng nhập"}</button></section>;
 }
 
 function rowToVocab(row) { return { id: row.word_id, word: row.word, meaning: row.meaning || "", partOfSpeech: row.part_of_speech || "Chưa xác định", ipa: row.ipa || "", audio: row.audio || "", collocations: row.collocations || [], examples: row.examples || [], definitionEn: row.definition_en || "", synonyms: row.synonyms || [], learnedAt: row.learned_at, reps: row.reps || 0, topic: row.topic || "Chưa phân loại" }; }
 
 function App() {
-  const [page, setPage] = useState("home"); const [user, setUser] = useState(null); const [authReady, setAuthReady] = useState(false); const [vocab, setVocab] = useState([]);
-  useEffect(() => { if (!supabase) { setAuthReady(true); return undefined; } let mounted = true; supabase.auth.getSession().then(({ data }) => { if (mounted) { setUser(data.session?.user || null); setAuthReady(true); } }); const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => { setUser(session?.user || null); setAuthReady(true); }); return () => { mounted = false; listener.subscription.unsubscribe(); }; }, []);
+  const [page, setPage] = useState("home"); const [user, setUser] = useState(null); const [profileUsername, setProfileUsername] = useState(""); const [authReady, setAuthReady] = useState(false); const [vocab, setVocab] = useState([]);
+  const applySession = async (session) => {
+    const nextUser = session?.user || null;
+    setUser(nextUser);
+    if (!nextUser || !supabase) { setProfileUsername(""); return; }
+    const metadataName = cleanText(nextUser.user_metadata?.username);
+    if (metadataName) setProfileUsername(metadataName);
+    const { data } = await supabase.from("profiles").select("username").eq("user_id", nextUser.id).maybeSingle();
+    if (data?.username) setProfileUsername(data.username);
+  };
+  useEffect(() => {
+    if (!supabase) { setAuthReady(true); return undefined; }
+    let mounted = true;
+    supabase.auth.getSession().then(async ({ data }) => {
+      if (!mounted) return;
+      await applySession(data.session);
+      if (mounted) setAuthReady(true);
+    });
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => {
+      // Do not await database queries directly inside the auth callback.
+      setUser(session?.user || null);
+      if (!session?.user) setProfileUsername("");
+      setAuthReady(true);
+      setTimeout(() => { if (mounted && session?.user) applySession(session); }, 0);
+    });
+    return () => { mounted = false; listener.subscription.unsubscribe(); };
+  }, []);
   useEffect(() => {
     if (!user || !supabase) { setVocab([]); return; }
     let alive = true;
@@ -385,10 +456,10 @@ function App() {
   }, [user]);
   const signOut = async () => {
     if (supabase) { const { error } = await supabase.auth.signOut(); if (error) return; }
-    setUser(null); setVocab([]); setPage("home");
+    setUser(null); setProfileUsername(""); setVocab([]); setPage("home");
   };
   const goAccount = () => setPage("account");
-  return <div className="carrot-app"><Header page={page} setPage={setPage} user={user} onAccount={goAccount} /><main className="content">{page === "home" && <Home setPage={setPage} user={user} />}{page === "vocab" && <VocabPage vocab={vocab} setVocab={setVocab} user={user} setPage={setPage} />}{page === "review" && <ReviewPage vocab={vocab} user={user} setPage={setPage} />}{page === "account" && <AccountPage user={user} authReady={authReady} onSignedIn={setUser} onSignOut={signOut} />} {page === "link" && <LinkPage user={user} />}</main><footer>🥕 Học tiếng Anh cùng Rốt</footer></div>;
+  return <div className="carrot-app"><Header page={page} setPage={setPage} user={user} onAccount={goAccount} /><main className="content">{page === "home" && <Home setPage={setPage} user={user} profileUsername={profileUsername} />}{page === "vocab" && <VocabPage vocab={vocab} setVocab={setVocab} user={user} setPage={setPage} />}{page === "review" && <ReviewPage vocab={vocab} user={user} setPage={setPage} />}{page === "account" && <AccountPage user={user} profileUsername={profileUsername} authReady={authReady} onSignedIn={user => applySession({ user })} onSignOut={signOut} />} {page === "link" && <LinkPage user={user} />}</main><footer>🥕 Học tiếng Anh cùng Rốt</footer></div>;
 }
 
 createRoot(document.getElementById("root")).render(<App />);

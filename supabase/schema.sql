@@ -134,6 +134,72 @@ $$;
 revoke execute on function public.username_available(text) from public;
 grant execute on function public.username_available(text) to anon, authenticated;
 
+-- Save vocabulary through a SECURITY DEFINER RPC. The authenticated user's id is
+-- always taken from auth.uid(), never trusted from the browser payload. This avoids
+-- PostgREST upsert/RLS/trigger edge cases that can make a valid insert look like a failure.
+create or replace function public.save_user_vocab(vocab_payload jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  me uuid := auth.uid();
+  result public.user_vocab;
+  p_word_id text;
+  p_word text;
+begin
+  if me is null then
+    raise exception 'Bạn cần đăng nhập để lưu từ.';
+  end if;
+  if vocab_payload is null or jsonb_typeof(vocab_payload) <> 'object' then
+    raise exception 'Dữ liệu từ vựng không hợp lệ.';
+  end if;
+
+  p_word_id := lower(trim(coalesce(vocab_payload->>'word_id', '')));
+  p_word := trim(coalesce(vocab_payload->>'word', ''));
+  if p_word_id = '' or p_word = '' then
+    raise exception 'Thiếu từ tiếng Anh cần lưu.';
+  end if;
+
+  insert into public.user_vocab(
+    user_id, word_id, word, meaning, part_of_speech, ipa, audio,
+    collocations, examples, definition_en, synonyms, learned_at, reps, topic
+  ) values (
+    me,
+    p_word_id,
+    p_word,
+    nullif(trim(vocab_payload->>'meaning'), ''),
+    nullif(trim(vocab_payload->>'part_of_speech'), ''),
+    nullif(trim(vocab_payload->>'ipa'), ''),
+    nullif(trim(vocab_payload->>'audio'), ''),
+    case when jsonb_typeof(vocab_payload->'collocations') = 'array' then vocab_payload->'collocations' else '[]'::jsonb end,
+    case when jsonb_typeof(vocab_payload->'examples') = 'array' then vocab_payload->'examples' else '[]'::jsonb end,
+    nullif(trim(vocab_payload->>'definition_en'), ''),
+    case when jsonb_typeof(vocab_payload->'synonyms') = 'array' then vocab_payload->'synonyms' else '[]'::jsonb end,
+    coalesce(nullif(vocab_payload->>'learned_at', '')::timestamptz, now()),
+    greatest(coalesce(nullif(vocab_payload->>'reps', '')::integer, 0), 0),
+    coalesce(nullif(trim(vocab_payload->>'topic'), ''), 'Chưa phân loại')
+  )
+  on conflict (user_id, word_id) do update set
+    word = excluded.word,
+    meaning = excluded.meaning,
+    part_of_speech = excluded.part_of_speech,
+    ipa = excluded.ipa,
+    audio = excluded.audio,
+    collocations = excluded.collocations,
+    examples = excluded.examples,
+    definition_en = excluded.definition_en,
+    synonyms = excluded.synonyms
+  returning * into result;
+
+  return to_jsonb(result);
+end;
+$$;
+
+revoke execute on function public.save_user_vocab(jsonb) from public;
+grant execute on function public.save_user_vocab(jsonb) to authenticated;
+
 create or replace function public.get_login_email(login_value text)
 returns text
 language sql
