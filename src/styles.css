@@ -15,7 +15,7 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 .carrot-app { min-height: 100vh; background: linear-gradient(180deg, #fff 0%, #fffaf7 100%); }
 .topbar { position: sticky; top: 0; z-index: 20; height: 76px; padding: 0 28px; display: flex; align-items: center; justify-content: space-between; background: rgba(255,255,255,.96); border-bottom: 1px solid #ffe2d1; box-shadow: 0 5px 20px rgba(110,55,25,.05); backdrop-filter: blur(10px); }
 .brand-mini { display: flex; align-items: center; gap: 10px; color: #ff6415; font-weight: 800; cursor: pointer; }
-.brand-mini img { width: 34px; height: 54px; object-fit: contain; }
+.brand-mini img { width: 42px; height: 42px; object-fit: cover; border-radius: 12px; border: 1px solid #ffd9c4; }
 .topbar nav { display: flex; gap: 8px; }
 .topbar nav button { border: 0; background: transparent; color: #77747a; font-weight: 700; padding: 11px 16px; border-radius: 14px; }
 .topbar nav button:hover, .topbar nav button.active { background: #fff0e8; color: #ff6415; }

@@ -2,10 +2,9 @@ import React, { useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { createClient } from "@supabase/supabase-js";
 import carrotLogo from "./assets/carrot-logo.png";
+import carrotAvatar from "./assets/carrot-avatar.png";
 import "./styles.css";
 
-const STORAGE_KEY = "rot_vocab_v1";
-const REVIEW_KEY = "rot_review_v1";
 const DEFAULT_TOPICS = ["Chưa phân loại"];
 const TOPIC_STORAGE = "rot_custom_topics_v1";
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
@@ -16,6 +15,22 @@ const cleanText = (value) => String(value ?? "").replace(/<[^>]*>/g, "").replace
 const cap = (value) => { const text = cleanText(value); return text ? text.charAt(0).toUpperCase() + text.slice(1) : ""; };
 const normalizeWord = (value) => cleanText(value).toLowerCase();
 const formatIpa = (value) => { const text = cleanText(value).replace(/^\/+|\/+$/g, ""); return text ? `/${text}/` : ""; };
+const escapeRegExp = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+function authErrorMessage(error) {
+  const raw = cleanText(error?.message || error || "");
+  const lower = raw.toLowerCase();
+  if (lower.includes("email rate limit exceeded") || lower.includes("rate limit")) {
+    return "Supabase đang giới hạn số email gửi ra. Nếu bạn không cần xác nhận email, hãy vào Supabase → Authentication → Providers → Email và tắt Confirm email; nếu cần xác nhận email, hãy chờ giới hạn được reset hoặc cấu hình SMTP riêng.";
+  }
+  if (lower.includes("invalid login credentials")) return "Gmail/tên đăng nhập hoặc mật khẩu không đúng.";
+  if (lower.includes("email not confirmed")) return "Email chưa được xác nhận. Hãy kiểm tra hộp thư và thư rác rồi xác nhận email.";
+  if (lower.includes("user already registered")) return "Email này đã được đăng ký. Hãy đăng nhập bằng Gmail/email hoặc tên đăng nhập.";
+  if (lower.includes("password should be at least")) return "Mật khẩu chưa đủ độ dài theo yêu cầu của Supabase.";
+  if (lower.includes("username") && lower.includes("used")) return "Tên đăng nhập này đã được sử dụng.";
+  return raw || "Không thể thực hiện. Hãy kiểm tra thông tin và thử lại.";
+}
+
 
 async function translate(text) {
   const q = cleanText(text); if (!q) return "";
@@ -71,38 +86,74 @@ async function enrichWord(word) {
 
 function shuffle(items) { return [...items].sort(() => Math.random() - 0.5); }
 function buildQuestions(vocab, count) {
-  if (!vocab.length) return [];
-  const source = shuffle(vocab); const questions = []; const types = ["word", "phrase", "sentence", "fill"];
-  for (let i = 0; i < count; i += 1) {
-    const item = source[i % source.length]; const type = types[i % types.length];
-    if (type === "word") {
-      const answer = item.meaning || "Chưa có nghĩa"; const distractors = shuffle(vocab.filter(v => v.id !== item.id).map(v => v.meaning).filter(Boolean)).slice(0, 3);
-      if (distractors.length < 3) continue;
-      questions.push({ type, prompt: item.word, label: "Chọn nghĩa tiếng Việt đúng cho từ:", answer, choices: shuffle([answer, ...distractors]), wordId: item.id });
-    } else if (type === "phrase" && item.collocations?.length) {
-      const phrase = item.collocations[0]; const answer = phrase.vi || "Chưa có nghĩa";
-      const distractors = shuffle(vocab.flatMap(v => v.collocations || []).filter(p => p.en !== phrase.en).map(p => p.vi).filter(Boolean)).slice(0, 3);
-      if (distractors.length < 3) continue;
-      questions.push({ type, prompt: phrase.en, label: "Chọn nghĩa tiếng Việt đúng cho cụm từ:", answer, choices: shuffle([answer, ...distractors]), wordId: item.id });
-    } else if (type === "sentence" && item.examples?.length) {
-      const example = item.examples[0]; const answer = example.vi || "Chưa có nghĩa";
-      const distractors = shuffle(vocab.flatMap(v => v.examples || []).filter(e => e.en !== example.en).map(e => e.vi).filter(Boolean)).slice(0, 3);
-      if (distractors.length < 3) continue;
-      questions.push({ type, prompt: example.en, label: "Chọn nghĩa tiếng Việt đúng cho câu:", answer, choices: shuffle([answer, ...distractors]), wordId: item.id });
-    } else {
-      const example = item.examples?.[0]; const sentence = example?.en || `I really like ${item.word}.`;
-      const blank = sentence.replace(new RegExp(`\\b${item.word}\\b`, "i"), "_____ ").replace(/\s+$/, "");
-      const answer = item.word; const distractors = shuffle(vocab.filter(v => v.id !== item.id).map(v => v.word)).slice(0, 3);
-      if (distractors.length < 3) continue;
-      questions.push({ type: "fill", prompt: blank, label: "Chọn từ điền vào chỗ trống:", answer, choices: shuffle([answer, ...distractors]), wordId: item.id });
+  const pool = vocab.filter(Boolean);
+  if (!pool.length || count <= 0) return [];
+
+  const uniqueBy = (items, key) => {
+    const seen = new Set();
+    return items.filter((item) => {
+      const value = cleanText(key(item)).toLowerCase();
+      if (!value || seen.has(value)) return false;
+      seen.add(value);
+      return true;
+    });
+  };
+
+  const questions = [];
+  const candidates = [];
+  for (const item of shuffle(pool)) {
+    const meaning = cleanText(item.meaning);
+    const wordDistractors = uniqueBy(pool.filter(v => v.id !== item.id).map(v => v.meaning), v => v).filter(v => v !== meaning);
+    if (meaning && wordDistractors.length >= 3) candidates.push({
+      type: "word",
+      prompt: item.word,
+      label: "Chọn nghĩa tiếng Việt đúng cho từ:",
+      answer: meaning,
+      distractors: wordDistractors.slice(0, 6),
+      wordId: item.id,
+    });
+
+    for (const phrase of (item.collocations || []).slice(0, 2)) {
+      const answer = cleanText(phrase.vi);
+      if (!answer) continue;
+      const distractors = uniqueBy(pool.flatMap(v => v.collocations || []).filter(p => p.en !== phrase.en).map(p => p.vi), v => v).filter(v => v !== answer);
+      if (distractors.length >= 3) candidates.push({ type: "phrase", prompt: phrase.en, label: "Chọn nghĩa tiếng Việt đúng cho cụm từ:", answer, distractors: distractors.slice(0, 6), wordId: item.id });
+      break;
+    }
+
+    for (const example of (item.examples || []).slice(0, 2)) {
+      const answer = cleanText(example.vi);
+      if (!answer) continue;
+      const distractors = uniqueBy(pool.flatMap(v => v.examples || []).filter(e => e.en !== example.en).map(e => e.vi), v => v).filter(v => v !== answer);
+      if (distractors.length >= 3) candidates.push({ type: "sentence", prompt: example.en, label: "Chọn nghĩa tiếng Việt đúng cho câu:", answer, distractors: distractors.slice(0, 6), wordId: item.id });
+      break;
+    }
+
+    const sentence = cleanText(item.examples?.[0]?.en) || `I really like ${item.word}.`;
+    const escapedWord = escapeRegExp(item.word);
+    if (new RegExp(`\\b${escapedWord}\\b`, "i").test(sentence)) {
+      const answer = item.word;
+      const distractors = uniqueBy(pool.filter(v => v.id !== item.id).map(v => v.word), v => v).filter(v => v.toLowerCase() !== answer.toLowerCase());
+      if (distractors.length >= 3) candidates.push({ type: "fill", prompt: sentence.replace(new RegExp(`\\b${escapedWord}\\b`, "i"), "_____"), label: "Chọn từ điền vào chỗ trống:", answer, distractors: distractors.slice(0, 6), wordId: item.id });
     }
   }
+
+  const shuffled = shuffle(candidates);
+  const usedKeys = new Set();
+  for (const candidate of shuffled) {
+    if (questions.length >= count) break;
+    const key = `${candidate.type}|${candidate.wordId}|${candidate.prompt}`;
+    if (usedKeys.has(key)) continue;
+    usedKeys.add(key);
+    questions.push({ ...candidate, choices: shuffle([candidate.answer, ...shuffle(candidate.distractors).slice(0, 3)]) });
+  }
+
   return questions;
 }
 
 function Header({ page, setPage, user, onAccount }) {
   return <header className="topbar">
-    <div className="brand-mini" onClick={() => setPage("home")}><img src={carrotLogo} alt="Cà rốt" /><span>Học tiếng Anh cùng Rốt</span></div>
+    <div className="brand-mini" onClick={() => setPage("home")}><img src={carrotAvatar} alt="Rốt" /><span>Học tiếng Anh cùng Rốt</span></div>
     <nav>
       <button className={page === "home" ? "active" : ""} onClick={() => setPage("home")}>Trang chủ</button>
       <button className={page === "vocab" ? "active" : ""} onClick={() => setPage("vocab")}>Từ vựng</button>
@@ -141,6 +192,7 @@ function VocabPage({ vocab, setVocab, user, setPage }) {
   }, [vocab, customTopics]);
   const createTopic = (event) => {
     event.preventDefault();
+    if (!user) { setError("Bạn cần đăng nhập để tạo chủ đề."); return; }
     const name = cleanText(newTopic);
     if (!name || name === "Chưa phân loại") return;
     const exists = topics.some(topic => topic.toLowerCase() === name.toLowerCase());
@@ -157,14 +209,24 @@ function VocabPage({ vocab, setVocab, user, setPage }) {
     const clean = normalizeWord(word); if (!clean) return; setLoading(true);
     try {
       const data = await enrichWord(clean);
-      const payload = { user_id: user.id, word_id: data.id, word: data.word, meaning: data.meaning, part_of_speech: data.partOfSpeech, ipa: data.ipa, audio: data.audio, collocations: data.collocations || [], examples: data.examples || [], definition_en: data.definitionEn || "", synonyms: data.synonyms || [], learned_at: data.learnedAt, reps: data.reps || 0, topic: "Chưa phân loại" };
+      const existing = vocab.find(item => item.id === data.id);
+      const payload = {
+        user_id: user.id, word_id: data.id, word: data.word, meaning: data.meaning,
+        part_of_speech: data.partOfSpeech, ipa: data.ipa, audio: data.audio,
+        collocations: data.collocations || [], examples: data.examples || [],
+        definition_en: data.definitionEn || "", synonyms: data.synonyms || [],
+        learned_at: existing?.learnedAt || data.learnedAt, reps: existing?.reps || 0,
+        topic: existing?.topic || "Chưa phân loại",
+      };
       if (!supabase) throw new Error("supabase_missing");
       const { data: saved, error: saveError } = await supabase.from("user_vocab").upsert(payload, { onConflict: "user_id,word_id" }).select().single();
       if (saveError) throw saveError;
       const normalized = rowToVocab(saved);
       setVocab(current => current.some(item => item.id === normalized.id) ? current.map(item => item.id === normalized.id ? normalized : item) : [normalized, ...current]);
       setDetail(normalized); setWord("");
-    } catch (e) { setError(e?.message === "supabase_missing" ? "Chưa cấu hình Supabase. Hãy điền VITE_SUPABASE_URL và VITE_SUPABASE_ANON_KEY trong file .env.local." : "Không thể lưu từ. Hãy kiểm tra kết nối và cấu hình tài khoản rồi thử lại."); }
+    } catch (e) {
+      setError(e?.message === "supabase_missing" ? "Chưa cấu hình Supabase. Hãy điền VITE_SUPABASE_URL và VITE_SUPABASE_ANON_KEY trong file .env.local." : "Không thể lưu từ. Hãy kiểm tra từ tiếng Anh, kết nối mạng và tài khoản rồi thử lại.");
+    }
     finally { setLoading(false); }
   };
   const updateTopic = async (item, topic) => {
@@ -205,18 +267,28 @@ function WordDetail({ item, onClose, onDelete }) {
 }
 
 function ReviewPage({ vocab, user, setPage }) {
-  const [questions, setQuestions] = useState([]); const [index, setIndex] = useState(0); const [choice, setChoice] = useState(null); const [started, setStarted] = useState(false); const [score, setScore] = useState(0); const [count, setCount] = useState(10); const [reviewMode, setReviewMode] = useState("random"); const [reviewTopic, setReviewTopic] = useState("");
+  const [questions, setQuestions] = useState([]); const [index, setIndex] = useState(0); const [choice, setChoice] = useState(null); const [started, setStarted] = useState(false); const [score, setScore] = useState(0); const [count, setCount] = useState(10); const [reviewMode, setReviewMode] = useState("random"); const [reviewTopic, setReviewTopic] = useState(""); const [startError, setStartError] = useState(""); const [finished, setFinished] = useState(false); const [finalScore, setFinalScore] = useState(0);
   const current = questions[index]; const answered = choice !== null;
   const topics = [...new Set(vocab.map(v => v.topic).filter(t => t && t !== "Chưa phân loại"))].sort((a,b) => a.localeCompare(b, "vi"));
   const start = () => {
     const pool = reviewMode === "topic" ? vocab.filter(v => v.topic === reviewTopic) : vocab;
     const built = buildQuestions(pool, Number(count));
-    setQuestions(built); setIndex(0); setChoice(null); setScore(0); setStarted(built.length > 0);
+    setQuestions(built); setIndex(0); setChoice(null); setScore(0); setFinalScore(0); setFinished(false); setStartError(""); setStarted(built.length > 0);
+    if (!built.length && pool.length) setStartError("Kho từ chưa đủ dữ liệu để tạo câu hỏi 4 đáp án. Hãy thêm vài từ khác có nghĩa, cụm từ hoặc ví dụ rồi thử lại.");
   };
-  const answer = selected => { if (answered) return; setChoice(selected); if (selected === current.answer) setScore(s => s + 1); localStorage.setItem(REVIEW_KEY, JSON.stringify({ lastReview: new Date().toISOString(), wordId: current.wordId })); };
-  const next = () => { if (index + 1 >= questions.length) { setStarted(false); return; } setIndex(i => i + 1); setChoice(null); };
+  const answer = selected => { if (answered) return; setChoice(selected); if (selected === current.answer) setScore(s => s + 1);  };
+  const next = () => {
+    if (index + 1 >= questions.length) {
+      setFinalScore(score + (choice === current.answer ? 1 : 0));
+      setStarted(false);
+      setFinished(true);
+      return;
+    }
+    setIndex(i => i + 1); setChoice(null);
+  };
   if (!user) return <section className="page-card review-start"><div className="review-carrot"><img src={carrotLogo} alt="Cà rốt" /></div><div className="eyebrow">ÔN TẬP</div><h2>Ôn tập từ đã học</h2><p>Bạn cần đăng nhập để rốt lấy đúng những từ bạn đã lưu và tạo bộ câu hỏi cá nhân.</p><button className="primary large" onClick={() => setPage("account")}>🔐 Đăng nhập để ôn tập</button></section>;
-  if (!started) return <section className="page-card review-start"><div className="review-carrot"><img src={carrotLogo} alt="Cà rốt" /></div><div className="eyebrow">ÔN TẬP</div><h2>Ôn tập từ đã học</h2><p>Ôn tập <b>không giới hạn số lần</b>. Bạn có thể tạo bộ mới bất cứ lúc nào: ngẫu nhiên từ toàn bộ kho hoặc chỉ ôn theo một chủ đề.</p><div className="review-stats"><b>{vocab.length}</b><span>từ đã lưu</span></div>{vocab.length === 0 && <div className="error-box">Hãy thêm ít nhất 1 từ ở mục Từ vựng trước khi bắt đầu ôn tập.</div>}<div className="review-mode-picker"><span>Phạm vi ôn tập</span><div className="mode-buttons"><button className={reviewMode === "random" ? "selected" : ""} onClick={() => setReviewMode("random")}>🎲 Ngẫu nhiên từ đã thêm</button><button className={reviewMode === "topic" ? "selected" : ""} onClick={() => setReviewMode("topic")}>🏷️ Ôn theo chủ đề</button></div>{reviewMode === "topic" && <select value={reviewTopic} onChange={e => setReviewTopic(e.target.value)}><option value="">-- Chọn chủ đề --</option>{topics.map(topic => <option key={topic} value={topic}>{topic}</option>)}</select>}{reviewMode === "topic" && !topics.length && <small className="muted">Bạn chưa tạo chủ đề nào. Hãy tạo chủ đề trong mục Từ vựng.</small>}</div><div className="count-picker"><span>Số câu mỗi lượt</span>{[10,20,30].map(n => <button key={n} className={count === n ? "selected" : ""} onClick={() => setCount(n)}>{n}</button>)}</div><button className="primary large" disabled={!vocab.length || (reviewMode === "topic" && !reviewTopic)} onClick={start}>▶ Bắt đầu ôn tập</button></section>;
+  if (finished) return <section className="page-card review-start"><div className="review-carrot"><img src={carrotLogo} alt="Cà rốt" /></div><div className="eyebrow">HOÀN THÀNH ÔN TẬP</div><h2>Giỏi lắm! 🥕</h2><p>Bạn vừa hoàn thành một lượt ôn tập.</p><div className="review-stats"><b>{finalScore}/{questions.length}</b><span>câu đúng</span></div><button className="primary large" onClick={() => { setFinished(false); setIndex(0); setChoice(null); }}>▶ Chọn bộ câu hỏi mới</button></section>;
+  if (!started) return <section className="page-card review-start"><div className="review-carrot"><img src={carrotLogo} alt="Cà rốt" /></div><div className="eyebrow">ÔN TẬP</div><h2>Ôn tập từ đã học</h2><p>Ôn tập <b>không giới hạn số lần</b>. Bạn có thể tạo bộ mới bất cứ lúc nào: ngẫu nhiên từ toàn bộ kho hoặc chỉ ôn theo một chủ đề.</p><div className="review-stats"><b>{vocab.length}</b><span>từ đã lưu</span></div>{vocab.length === 0 && <div className="error-box">Hãy thêm ít nhất 1 từ ở mục Từ vựng trước khi bắt đầu ôn tập.</div>}<div className="review-mode-picker"><span>Phạm vi ôn tập</span><div className="mode-buttons"><button className={reviewMode === "random" ? "selected" : ""} onClick={() => setReviewMode("random")}>🎲 Ngẫu nhiên từ đã thêm</button><button className={reviewMode === "topic" ? "selected" : ""} onClick={() => setReviewMode("topic")}>🏷️ Ôn theo chủ đề</button></div>{reviewMode === "topic" && <select value={reviewTopic} onChange={e => setReviewTopic(e.target.value)}><option value="">-- Chọn chủ đề --</option>{topics.map(topic => <option key={topic} value={topic}>{topic}</option>)}</select>}{reviewMode === "topic" && !topics.length && <small className="muted">Bạn chưa tạo chủ đề nào. Hãy tạo chủ đề trong mục Từ vựng.</small>}</div><div className="count-picker"><span>Số câu mỗi lượt</span>{[10,20,30].map(n => <button key={n} className={count === n ? "selected" : ""} onClick={() => setCount(n)}>{n}</button>)}</div>{startError && <div className="error-box">{startError}</div>}<button className="primary large" disabled={!vocab.length || (reviewMode === "topic" && !reviewTopic)} onClick={start}>▶ Bắt đầu ôn tập</button></section>;
   const correct = choice === current.answer;
   return <section className="page-card quiz-card"><div className="quiz-top"><span>Câu {index + 1}/{questions.length}</span><b>Điểm: {score}</b><button className="secondary small" onClick={() => setStarted(false)}>Thoát</button></div><div className="progress"><span style={{ width: `${((index + 1) / questions.length) * 100}%` }} /></div><div className="question-label">{current.label}</div><div className="question-prompt">{current.prompt}</div><div className="choices">{current.choices.map((option, i) => { const letter = String.fromCharCode(65 + i); const isCorrect = option === current.answer; const isChosen = option === choice; return <button key={`${option}-${i}`} className={`choice ${answered ? (isCorrect ? "correct" : isChosen ? "wrong" : "muted-choice") : ""}`} onClick={() => answer(option)}><b>{letter}.</b><span>{option}</span></button>; })}</div>{answered && <div className={`feedback ${correct ? "good" : "bad"}`}><b>{correct ? "✓ Chính xác!" : `✗ Đáp án đúng: ${current.answer}`}</b><p>{current.type === "fill" ? `Từ “${current.answer}” phù hợp nhất với ngữ cảnh của câu.` : `Đây là nghĩa phù hợp nhất với nội dung đang được hỏi.`}</p><button className="primary" onClick={next}>{index + 1 === questions.length ? "Kết thúc" : "Câu tiếp theo →"}</button></div>}</section>;
 }
@@ -227,7 +299,7 @@ function LinkPage({ user }) {
   useEffect(() => { load(); }, [user]);
   const link = async e => { e.preventDefault(); setLoading(true); setError(""); setMessage(""); if (!supabase) { setError("Chưa cấu hình Supabase."); setLoading(false); return; } const { data, error: rpcError } = await supabase.rpc("link_account", { target_code: code.trim().toUpperCase() }); if (rpcError) setError(rpcError.message || "Không thể liên kết tài khoản."); else { setMessage(data?.message || "Đã liên kết tài khoản. Kho từ và chủ đề sẽ đồng bộ."); setCode(""); await load(); } setLoading(false); };
   if (!user) return <section className="page-card link-card"><div className="review-carrot"><img src={carrotLogo} alt="Cà rốt" /></div><div className="eyebrow">LIÊN KẾT</div><h2>Liên kết kho từ</h2><p>Bạn cần đăng nhập để tạo mã liên kết và kết nối kho từ với tài khoản khác.</p></section>;
-  return <section className="page-card link-card"><div className="eyebrow">LIÊN KẾT</div><h2>Kết nối kho từ vựng</h2><p>Dùng mã của một tài khoản khác để chia sẻ kho. Từ mới và thay đổi chủ đề sẽ được đồng bộ giữa các tài khoản đã liên kết.</p><div className="my-code"><span>Mã liên kết của bạn</span><b>{myCode || "Đang tạo..."}</b></div><form className="add-form link-form" onSubmit={link}><input value={code} onChange={e => setCode(e.target.value.toUpperCase())} placeholder="Nhập mã liên kết của tài khoản kia" maxLength={8} required /><button className="primary" disabled={loading}>{loading ? "Đang liên kết..." : "🔗 Liên kết"}</button></form>{error && <div className="error-box">{error}</div>}{message && <div className="success-box">{message}</div>}<div className="sync-note"><b>Đồng bộ tự động</b><p>• Thêm một từ → từ đó được thêm vào kho của các tài khoản liên kết.<br/>• Đổi chủ đề của một từ → chủ đề được cập nhật cho các tài khoản liên kết.</p></div></section>;
+  return <section className="page-card link-card"><div className="eyebrow">LIÊN KẾT</div><h2>Kết nối kho từ vựng</h2><p>Dùng mã của một tài khoản khác để chia sẻ kho. Từ mới và chủ đề được gán cho từng từ sẽ được đồng bộ giữa các tài khoản đã liên kết.</p><div className="my-code"><span>Mã liên kết của bạn</span><b>{myCode || "Đang tạo..."}</b></div><form className="add-form link-form" onSubmit={link}><input value={code} onChange={e => setCode(e.target.value.toUpperCase())} placeholder="Nhập mã liên kết của tài khoản kia" maxLength={8} required /><button className="primary" disabled={loading}>{loading ? "Đang liên kết..." : "🔗 Liên kết"}</button></form>{error && <div className="error-box">{error}</div>}{message && <div className="success-box">{message}</div>}<div className="sync-note"><b>Đồng bộ tự động</b><p>• Thêm một từ → từ đó được thêm vào kho của các tài khoản liên kết.<br/>• Đổi chủ đề của một từ → chủ đề được cập nhật cho các tài khoản liên kết.</p></div></section>;
 }
 
 function AccountPage({ user, authReady, onSignedIn, onSignOut }) {
@@ -264,17 +336,21 @@ function AccountPage({ user, authReady, onSignedIn, onSignOut }) {
         const { data: exists, error: existsError } = await supabase.rpc("username_available", { wanted_username: cleanUsername });
         if (existsError) throw existsError;
         if (!exists) throw new Error("Tên đăng nhập này đã được sử dụng.");
+        const cooldownKey = `rot_signup_attempt_${cleanEmail}`;
+        const lastAttempt = Number(localStorage.getItem(cooldownKey) || 0);
+        if (Date.now() - lastAttempt < 30000) throw new Error("Vui lòng chờ khoảng 30 giây trước khi gửi lại yêu cầu đăng ký.");
+        localStorage.setItem(cooldownKey, String(Date.now()));
         const { data, error: signError } = await supabase.auth.signUp({ email: cleanEmail, password, options: { data: { username: cleanUsername } } });
         if (signError) throw signError;
         if (data.session) { onSignedIn(data.user); setMessage("Tạo tài khoản thành công."); }
         else { setMessage("Tạo tài khoản thành công. Hãy kiểm tra Gmail/email để xác nhận tài khoản nếu Supabase yêu cầu."); }
       }
-    } catch (err) { setError(err?.message || "Không thể thực hiện. Hãy kiểm tra thông tin và thử lại."); }
+    } catch (err) { setError(authErrorMessage(err)); }
     finally { setLoading(false); }
   };
   if (!authReady) return <section className="page-card account-card"><h2>Tài khoản</h2><p>Đang kiểm tra phiên đăng nhập...</p></section>;
-  if (user) return <section className="page-card account-card"><img src={carrotLogo} alt="Cà rốt" /><div className="eyebrow">TÀI KHOẢN</div><h2>Xin chào!</h2><p>Tài khoản đang đăng nhập: <b>{user.email}</b></p><button className="primary" onClick={onSignOut}>Đăng xuất</button></section>;
-  return <section className="page-card account-card"><img src={carrotLogo} alt="Cà rốt" /><div className="eyebrow">TÀI KHOẢN</div><h2>{mode === "login" ? "Đăng nhập" : "Tạo tài khoản"}</h2><p>{mode === "login" ? "Đăng nhập bằng Gmail/email hoặc tên đăng nhập." : "Tạo tài khoản bằng tên đăng nhập, Gmail/email và mật khẩu."}</p><form className="account-form" onSubmit={submit}>{mode === "signup" && <input value={username} onChange={e => setUsername(e.target.value)} placeholder="Tên đăng nhập" minLength={3} maxLength={30} autoComplete="username" required />}{mode === "signup" ? <input type="email" value={email} onChange={e => setEmail(e.target.value)} placeholder="Gmail / Email" autoComplete="email" required /> : <input type="text" value={loginValue} onChange={e => setLoginValue(e.target.value)} placeholder="Gmail / Email hoặc tên đăng nhập" autoComplete="username" required />}{<input type="password" value={password} onChange={e => setPassword(e.target.value)} placeholder="Mật khẩu (tối thiểu 6 ký tự)" minLength={6} autoComplete={mode === "login" ? "current-password" : "new-password"} required />}<button className="primary" disabled={loading}>{loading ? "Đang xử lý..." : mode === "login" ? "Đăng nhập" : "Tạo tài khoản"}</button></form>{error && <div className="error-box">{error}</div>}{message && <div className="success-box">{message}</div>}<button className="link-btn" onClick={() => { setMode(mode === "login" ? "signup" : "login"); setError(""); setMessage(""); }}>{mode === "login" ? "Chưa có tài khoản? Tạo tài khoản" : "Đã có tài khoản? Đăng nhập"}</button></section>;
+  if (user) return <section className="page-card account-card"><img src={carrotLogo} alt="Cà rốt" /><div className="eyebrow">TÀI KHOẢN</div><h2>Xin chào!</h2><p>Tên đăng nhập: <b>{user.user_metadata?.username || "—"}</b><br />Email: <b>{user.email}</b></p><button className="primary" onClick={onSignOut}>Đăng xuất</button></section>;
+  return <section className="page-card account-card"><img src={carrotLogo} alt="Cà rốt" /><div className="eyebrow">TÀI KHOẢN</div><h2>{mode === "login" ? "Đăng nhập" : "Tạo tài khoản"}</h2><p>{mode === "login" ? "Chỉ cần nhập Gmail/email hoặc tên đăng nhập, không cần nhập cả hai." : "Tạo tài khoản bằng tên đăng nhập, Gmail/email và mật khẩu. Mỗi email và tên đăng nhập chỉ dùng cho một tài khoản."}</p><form className="account-form" onSubmit={submit}>{mode === "signup" && <input value={username} onChange={e => setUsername(e.target.value)} placeholder="Tên đăng nhập" minLength={3} maxLength={30} autoComplete="username" required />}{mode === "signup" ? <input type="email" value={email} onChange={e => setEmail(e.target.value)} placeholder="Gmail / Email" autoComplete="email" required /> : <input type="text" value={loginValue} onChange={e => setLoginValue(e.target.value)} placeholder="Gmail / Email hoặc tên đăng nhập" autoComplete="username" required />}{<input type="password" value={password} onChange={e => setPassword(e.target.value)} placeholder="Mật khẩu (tối thiểu 6 ký tự)" minLength={6} autoComplete={mode === "login" ? "current-password" : "new-password"} required />}<button className="primary" disabled={loading}>{loading ? "Đang xử lý..." : mode === "login" ? "Đăng nhập" : "Tạo tài khoản"}</button></form>{error && <div className="error-box">{error}</div>}{message && <div className="success-box">{message}</div>}<button className="link-btn" onClick={() => { setMode(mode === "login" ? "signup" : "login"); setError(""); setMessage(""); }}>{mode === "login" ? "Chưa có tài khoản? Tạo tài khoản" : "Đã có tài khoản? Đăng nhập"}</button></section>;
 }
 
 function rowToVocab(row) { return { id: row.word_id, word: row.word, meaning: row.meaning || "", partOfSpeech: row.part_of_speech || "Chưa xác định", ipa: row.ipa || "", audio: row.audio || "", collocations: row.collocations || [], examples: row.examples || [], definitionEn: row.definition_en || "", synonyms: row.synonyms || [], learnedAt: row.learned_at, reps: row.reps || 0, topic: row.topic || "Chưa phân loại" }; }
@@ -307,8 +383,10 @@ function App() {
     })();
     return () => { alive = false; };
   }, [user]);
-  useEffect(() => { if (user || !vocab.length) return; localStorage.removeItem(STORAGE_KEY); }, [user, vocab.length]);
-  const signOut = async () => { if (supabase) await supabase.auth.signOut(); setUser(null); setVocab([]); setPage("home"); };
+  const signOut = async () => {
+    if (supabase) { const { error } = await supabase.auth.signOut(); if (error) return; }
+    setUser(null); setVocab([]); setPage("home");
+  };
   const goAccount = () => setPage("account");
   return <div className="carrot-app"><Header page={page} setPage={setPage} user={user} onAccount={goAccount} /><main className="content">{page === "home" && <Home setPage={setPage} user={user} />}{page === "vocab" && <VocabPage vocab={vocab} setVocab={setVocab} user={user} setPage={setPage} />}{page === "review" && <ReviewPage vocab={vocab} user={user} setPage={setPage} />}{page === "account" && <AccountPage user={user} authReady={authReady} onSignedIn={setUser} onSignOut={signOut} />} {page === "link" && <LinkPage user={user} />}</main><footer>🥕 Học tiếng Anh cùng Rốt</footer></div>;
 }

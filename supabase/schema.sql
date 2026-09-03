@@ -131,6 +131,7 @@ as $$
   select not exists (select 1 from public.profiles where lower(username) = lower(trim(wanted_username)));
 $$;
 
+revoke execute on function public.username_available(text) from public;
 grant execute on function public.username_available(text) to anon, authenticated;
 
 create or replace function public.get_login_email(login_value text)
@@ -146,6 +147,7 @@ as $$
   limit 1;
 $$;
 
+revoke execute on function public.get_login_email(text) from public;
 grant execute on function public.get_login_email(text) to anon, authenticated;
 
 -- Linking merges the two sharing groups. Existing vocabulary is copied both ways.
